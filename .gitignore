@@ -11,7 +11,7 @@ venv/
 
 # Data / artifacts / models / outputs
 artifacts/
-data/
+/data/
 outputs/
 pretrained/
 *.pt
