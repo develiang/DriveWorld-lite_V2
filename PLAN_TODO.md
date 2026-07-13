@@ -3,14 +3,16 @@
 > 本计划将 `roadmap.md` 中的 M0～M3 落成一版可执行工程方案。第一版只做：
 > **nuScenes / CAM_FRONT / 8 帧历史 → 16 帧未来 / 6 Hz / Ego 轨迹条件 / 256×448**。
 
-## 0. 当前状态（2026-07-12）
+## 0. 当前状态（2026-07-13）
 
 状态约定：`[x]` 已实现并通过相应非训练测试；`[ ]` 尚未完成；“部分完成”表示已有代码，但还缺验收项。
 
 - 工程代码：P0 基础骨架、M0 数据管线、M1/M2 模型骨架、M3 轨迹编辑与推理入口已落地；
 - mini 数据：10 scenes、196.55 秒、2342 个 CAM_FRONT 帧，生成 train 574 / val 192 个高度重叠 clips；
 - 数据验证：机械抽检 train/val 各 100 clips、共 4800 张图像，错误 0、scene 泄漏 0、时间误差 p95=33.333 ms；
-- 单元测试：22 passed；覆盖真实 Dataset contract、DDPM/RF可逆性、future-only mask、单帧STDiT、Ego顺序响应、EMA兼容和逐帧质量指标；
+- 单元测试：63 passed；覆盖真实 Dataset contract、DDPM/RF 可逆性、future-only mask、
+  单帧 STDiT、MDD 17→5 VAE/RF/CFG、权重严格加载、adapter-only checkpoint/resume、
+  Ego 顺序响应、EMA 兼容和逐帧质量指标；
 - VAE：本地 `pretrained/vae` 的 CogVideoX VAE（16 latent channels、空间压缩 8、时间压缩 4）加载成功；
 - VAE shape：1×256×448 → 1×16×32×56；8 帧 → 3 latent 帧；16 帧 → 5 latent 帧；padding/crop 重建测试通过；
 - 真实图像重建：单帧 PSNR 36.81 dB、8 帧 28.27 dB、16 帧 26.79 dB；样例结构保持良好，仍需多 clip 统计；
@@ -20,7 +22,28 @@
 - 尚未进行：16 clips/单 scene 正式 overfit、trainval 完整训练、真实多 GPU NCCL 验收、学习后控制性评估；
 - 数据结论：mini 足够做工程/数据/VAE smoke test，不足以正式训练或得出泛化结论；正式阶段需要 `v1.0-trainval`。
 - Partial trainval：已准备85个完整scene（train 62 / val 23）；8→16为4381/1624 clips，4→8为5586/2071 clips，随机检查与scene隔离通过；
-- V2 核心已落地：single-image anchor、SingleViewSTDiT、显式时空位置、逐 latent Ego 对齐、masked Rectified Flow、Euler/Heun、V2 cache fingerprint 和 EMA warmup；真实数据无训练 smoke 输出 `[1,16,3,256,448]`、峰值 9.483 GB；
+- V2-Lite 调试基线已落地：single-image anchor、自研 `SingleViewSTDiT`、显式时空位置、逐 latent Ego 对齐、masked Rectified Flow、Euler/Heun、V2 cache fingerprint 和 EMA warmup；真实数据无训练 smoke 输出 `[1,16,3,256,448]`、峰值 9.483 GB。该 16M 级模型只保留作接口/数据/RF 回归基线，正式 V2 主线改为适配 MagicDrive Stage-3 EMA 的 `V2-MDDiT`；
+- V2-MDDiT 权重适配已扩展到完整单视角 control 主干：Stage-3 `ema.pt`（SHA256
+  `0806b23...83334`）直接从 mmap FP32 materialize 为 BF16，主干/control 1489 keys、
+  1,806,221,732 参数严格加载；camera/frame/null-bbox 条件 50 keys、38,513,077 参数严格
+  加载，只有 4 个 kinematics adapter 张量为新增参数。修复了 control temporal skip 重复相加
+  和 PyTorch meta `assign=True` 间歇段错误；
+- V2-MDDiT 本机 S2 adapter 训练和用户侧 100-step/推理已跑通。正式主线现为 B2 静态图
+  control + temporal/cross-attention LoRA + AdaLN + action adapter，共 12,441,472 个可训练参数；
+  256×448 真实 backward loss=0.999229，allocated/reserved 峰值 7.798/8.823 GiB，梯度有限；
+  30-step B1/B2 推理均有限且 B2 对真实地图有非零响应，但零样本画质仍差，必须经过训练和
+  固定验证集评测后才能判断清晰度收益；
+- 静态地图数据链已落地：manifest schema v3 包含 location/map pose，nuScenes expansion JSON
+  生成 MagicDrive 同顺序 8×200×200 BEV；partial train/val 的 bit-packed mmap 缓存为
+  4381/1624 条，跨分段抽查逐像素一致。缓存生成按隔离 worker 可恢复原生崩溃，训练阶段
+  只读 mmap，不再在线调用 Shapely/GEOS；
+- 4×5090 配置已提供 12 Hz（50k steps）→6 Hz（100k steps）两阶段 DDP。`--resume` 只用于
+  同阶段恢复；新增 `--init-checkpoint` 只迁移 LoRA/AdaLN/action delta 并重置 optimizer、
+  scheduler、step 和 RNG。单 GPU 真实 dry-run 与 `torchrun --nproc_per_node=1` 均通过，
+  未自动启动训练；
+- 当前工作站 RGB 只有 metadata 预期帧的约 9.8%，full YAML 的 99% 图像完整率 gate 会主动
+  拒绝生成伪“全量” manifest。全量 manifest、4×GPU NCCL/DDP 和正式训练必须到用户的
+  4×5090 全量数据服务器上验收；
 
 ## 1. 交付目标与边界
 
@@ -37,7 +60,7 @@
 
 - 多相机、Map、3D Box、LiDAR/Radar、文本；
 - 17→48 直接生成和闭环仿真；
-- MagicDrive-V2 主干改造；
+- M0～M3 第一版不改 MagicDrive-V2 主干；正式 V2-MDDiT 适配单列于第 10 节；
 - 原始 RGB 全量复制或逐样本保存 tensor 文件。
 
 ## 2. 固定技术决策
@@ -350,284 +373,473 @@ P0 → M0-01..09 → M0 门禁 → M1 门禁 → M2-01..11 → M2 门禁 → M3 
 
 `train.py` 继续保留 `--start-training` 显式开关；任何 smoke/data/VAE 测试都不会自动跨入训练。
 
-## 10. V2 方案：单帧条件的清晰、稳定未来视频预测
+## 10. V2-MDDiT：基于 MagicDrive Stage-3 的单视角世界模型适配计划
 
-### 10.1 问题定义与第一版结论
+> 本节于 2026-07-13 重写。设计依据是本机
+> `/home/liang/code/MagicDrive-V2`（commit
+> `4ed72c60e5e73e4fa6072a7321fcc2ed9668edee`）的实际源码和 Stage-3 配置，
+> 不是按论文名称或模型外观猜测。用户给出的 `~/code/MagicDrive` 实际对应本机
+> `~/code/MagicDrive-V2`。
+>
+> 约束：本节只定义实现、测试和训练方案；任何正式训练都必须由用户显式启动，代码准备、
+> checkpoint 转换、单元测试和无反向 smoke test 不得自动进入训练。
 
-V2 的核心任务调整为：
+### 10.1 路线重定义
 
-```text
-单目 CAM_FRONT
-1 张 anchor image + future Ego trajectory
-    → 未来 16 帧，6 Hz，256×448
-```
+V2 的正式质量主线改为 **V2-MDDiT**：保留 MagicDrive Stage-3
+`MagicDriveSTDiT3-XL/2` 的 CogVideoX latent 接口、空间/时间 block、AdaLN、
+cross-attention、RF scheduler 与 EMA 权重，删除多相机拓扑依赖，并把条件改造成
+“单张 CAM_FRONT + 已知未来 Ego 动作/轨迹 → 16 帧未来”。
 
-同时保留 `8 history → 16 future` 作为增强模式和上限对照。训练和模型接口必须支持
-`history_frames ∈ {1, 8}`，但 V2 的正式验收必须单独报告单帧输入结果，不能用 8 帧历史
-结果代替。
+当前已经实现的 `driveworld/models/single_view_stdit.py` 不删除，但重命名为概念上的
+**V2-Lite**。它只负责数据 contract、mask、RF、Ego 对齐、checkpoint resume 和小显存
+回归，不再作为预期获得 MagicDrive 画质的主模型。原因不是参数量本身，而是它的维度、
+block 实现和参数命名均不能高覆盖加载 Stage-3 EMA。
 
-当前 step 11200 的 22.48M 3D U-Net 已学到 stop/straight/left/right 条件响应，但生成
-纹理随预测时距明显退化：样例中生成帧边缘强度从第 1 帧的 `7.23` 降至第 16 帧的
-`5.45`，与 GT 的像素 MAE 从 `16.33` 增至 `32.85`。这说明控制通路已经生效，主要
-瓶颈转为高噪声生成能力、远期历史约束、显式时间建模、数据规模和视频生成先验。
+正式目标固定为：
 
-单帧未来本质上是多解问题：单张图像无法唯一确定前车速度、遮挡后物体和未来动态。
-因此 V2 的“稳定”定义为场景结构、静态背景、物体身份和运动方向稳定，而不是要求每次
-随机采样都逐像素复现唯一 GT。正式评估必须同时报告固定 seed 确定性和多 seed 多样性。
+- RGB 序列：1 张 anchor + 16 张未来，共 17 帧；
+- 第一阶段复现 checkpoint 分布：224×400、12 Hz、17 帧；
+- 项目目标：256×448、6 Hz、17 帧，其中只输出/评分后 16 帧；
+- 视角数：`NC=1`，只使用 `CAM_FRONT`；
+- VAE：CogVideoX-2b VAE，16 latent channels，空间压缩 8、时间压缩 4；
+- 生成主干：`hidden_size=1152`、`depth=28`、`num_heads=16`、
+  `patch_size=(1,2,2)`、`pred_sigma=False`；
+- 训练目标：与 MagicDrive 相同的 rectified-flow velocity
+  `x_start - noise`，loss 只覆盖待生成 latent；
+- 本机只做转换、推理、forward/backward smoke 和 adapter/LoRA 调通；
+  4×5090 使用冻结 BF16 主干的 DDP 做 LoRA/AdaLN/action-adapter 正式训练。只有后续扩大
+  解冻范围、单卡不再容纳完整主干时，才切 FSDP/ZeRO，而不是在当前 1244 万可训练参数
+  阶段先引入额外分片复杂度。
 
-### 10.2 从 MagicDrive-V2 借鉴与不照搬的部分
+### 10.2 已核对的 MagicDrive 源码契约
 
-借鉴以下已经在 `~/code/MagicDrive-V2` 中落地的设计：
+| 源码位置 | 实际实现 | V2 结论 |
+|---|---|---|
+| `configs/magicdrive/train/stage3_higher-b-v3.1-12Hz_stdit3_CogVAE_boxTDS_wCT_xCE_wSST_bs4_lr1e-5_sp4simu8.py` | Stage-3 使用 16-channel CogVideoX latent、XL/2、bf16、SP=4、12 Hz、logit-normal RF、timestep transform、30-step val/CFG=2 | 新配置先逐项复现，不能直接沿用当前小 DiT YAML |
+| `magicdrivedit/models/magicdrive/magicdrive_stdit3.py::MagicDriveSTDiT3` | `PatchEmbed3D`、28 组 spatial block、28 组 temporal block、13 层 control branch、frame/camera/box/map embedder、`T2IFinalLayer` | 复用同构类或抽取同构最小实现，不用 PyTorch MHA 近似替代 |
+| `magicdrive_stdit3.py::MultiViewSTDiT3Block` | spatial block 默认执行 cross-view attention；temporal block自动跳过；空邻接表会在拼接邻居 token 时失败 | `NC=1` 时构造 spatial block 必须显式 `skip_cross_view=True`，不能传 `{0: []}` |
+| `magicdrive_stdit3.py::forward` | 当前代码通过 `len(mv_order_map)` 推断 `NC`，并强制调用 `encode_map` | 单视角 wrapper 必须显式固定 `NC=1`，并让 map/control branch 可选 |
+| `magicdrive_stdit3.py::encode_cond_sequence` | 每个时间位置组合 frame relative pose、首帧 camera、T5 文本和可选 bbox token | 保留 per-time cross-attention 契约；替换/裁剪条件，不重写整套 block |
+| `magicdrivedit/datasets/nuscenes_t_dataset.py::obtain_next2top` | 从 lidar/ego/global 标定计算 4×4 `next2top`，`frame_emb="next2top"` 送入 frame embedder | 项目必须按同方向生成 4×4 pose，并以数值测试对齐，不能只把 `x,y,yaw` 随意塞入 |
+| `magicdrivedit/models/vae/vae_cogvideox.py::VideoAutoencoderKLCogVideoX` | posterior 用 `sample() * scaling_factor`；`micro_frame_size=8`、`micro_batch_size=1`；encode 后清 causal cache | VAE wrapper、scaling、随机性和清 cache 行为均需一致 |
+| `magicdrivedit/utils/train_utils.py::MaskGenerator` | `image_head` 可将第一个 latent 标为 False，但源码在 `num_frames//4<=1` 时直接返回全 True，因此 17 RGB→5 latent bucket 实际不会触发 image-head；33 帧等长 bucket 才提供该训练信号 | V2 的 5-latent I2V mask 是对原 mask 机制的显式适配，不冒充 Stage-3 的 17 帧原始分布；不得给 latent 拼第 17 个 mask channel |
+| `magicdrivedit/schedulers/rf/rectified_flow.py` | `t=0` 为干净端、`t≈1000` 为噪声端；训练 target 为 `x_start-noise` | 当前 V2-Lite 的归一化时间定义不可原样送入 Stage-3 |
+| `magicdrivedit/schedulers/rf/__init__.py::RFLOW.sample` | 从 1000 向 0 Euler 更新，支持 clean-frame mask 和 CFG | MDDiT 路线优先移植/封装该 sampler，而不是复用语义不同的现有 sampler |
+| `scripts/train_magicdrive.py` | VAE `eval()` 且 `no_grad()` 在线编码；RGB 从 `[B,T,NC,C,H,W]` 变为 `[B*NC,C,T,H,W]`；模型与 EMA 单独保存 | 训练时 VAE 冻结但可在线编码；VAE 不进入 optimizer/checkpoint |
+| `magicdrivedit/utils/ckpt_utils.py` | `ema.pt` 是直接 `torch.save(ema.state_dict())` 的 FP32 state dict | 下载完成后先离线审计/转换一次，训练时不反复读取约 8 GB FP32 文件 |
 
-- 冻结 CogVideoX VAE，训练主模型时只在 latent space 学习；
-- 以预训练 Video DiT/STDiT 为生成主干，而不是从零训练小型 3D U-Net；
-- spatial block、temporal block 和条件控制分支分离；
-- Rectified Flow、logit-normal timestep sampling 和训练/推理一致的 timestep transform；
-- image → short video → long video → high resolution 的渐进训练；
-- 按分辨率、帧长、FPS 建 bucket，长视频使用 temporal chunk；
-- bf16、gradient checkpointing、EMA、ZeRO/FSDP 和 sequence parallel 的云端训练路径。
+### 10.3 预训练权重与可加载边界
 
-V2 不直接照搬以下部分：
+`pretrained/MDDiT/ema.pt` 已完整落盘（8,152,555,582 bytes），并已完成只读结构审计、
+SHA256 和单视角 base-only 映射报告；来源 revision/许可证元数据仍需补齐。
 
-- 不做六相机，不需要 cross-view attention 和六视角 channel packing；
-- 第一阶段不依赖 HD map、3D box、LiDAR/Radar 或 T5 文本；
-- 本机 16 GB 不做 STDiT 全参数大规模训练，只做小配置、adapter/LoRA 和推理 smoke；
-- 不直接复用 MagicDrive checkpoint，必须先验证 VAE latent scaling、patch shape、位置编码、
-  scheduler 和条件接口完全兼容。
+- [x] `V2-CKPT-01` `ema.pt` 已完整落盘，记录 8,152,555,582 bytes 与 SHA256；来源
+  MagicDrive-V2 commit 已固化。gated model 页面来源和发布许可证仍列入 `V2-SYS-05`；
+- [x] `V2-CKPT-02` 用 `torch.load(..., mmap=True, weights_only=True)` 只读审计 key、
+  shape、dtype；禁止在 4070Ti 上先构造两份 FP32 全模型；
+- [x] `V2-CKPT-03` 输出 `artifacts/reports/mdd_stage3_checkpoint.json`，包含
+  matched / dropped / missing / shape-mismatch 的参数个数、元素数和占比；
+- [x] `V2-CKPT-04` 已实现从 mmap FP32 EMA 直接把保留参数 materialize 到目标
+  device/BF16，真实峰值 2.403 GB；独立 BF16 `safetensors` 降为可选部署优化，不再是前置步骤；
+- [x] `V2-CKPT-05` 正式路径不再生成第二份转换权重；加载器按明确白名单从 mmap checkpoint
+  直接 materialize 目标 BF16 参数，单视角删除项、matched/missing/shape mismatch 均进入
+  report，避免 8 GB FP32 + 完整 BF16 文件同时常驻；
+- [x] `V2-CKPT-06` 已保存带 upstream commit/config SHA 的 Stage-3 source snapshot；
+  本项目 resolved config 会写入 load report。加载前校验 snapshot/report SHA、checkpoint
+  size/SHA 记录、`in_channels=16`、1152/28/16、patch 1×2×2 和 final 64×1152
+  （即 `pred_sigma=False`）；
+- [ ] `V2-CKPT-07` 在 MagicDrive 原仓库用原 config 跑一个官方 checkpoint 的无训练
+  推理/forward 基线，保存 shape、显存和固定 seed 输出摘要，作为适配前参照。
 
-参考实现位置：MagicDrive 的在线冻结 VAE 在
-`~/code/MagicDrive-V2/scripts/train_magicdrive.py`，渐进配置在
-`configs/magicdrive/train/stage1_*`、`stage2_*`、`stage3_*`，Rectified Flow 在
-`magicdrivedit/schedulers/rf/rectified_flow.py`。
+权重分类必须明确：
 
-### 10.3 V2 固定技术决策
-
-| 项目 | V2 决策 |
+| 权重组 | 处理 |
 |---|---|
-| 输入 | 主模式：1 张 anchor；增强模式：8 帧 history；均带 future Ego + valid mask |
-| 输出 | 16 future frames，6 Hz，256×448；后续再扩到 32 帧 |
-| VAE | 继续冻结 CogVideoX VAE，16 channels、空间 `/8`、时间约 `/4` |
-| 主干 | 预训练 single-view Video DiT/STDiT；保留当前 U-Net 作为消融基线 |
-| token | latent patch `(1,2,2)`；显式 temporal position/RoPE + 2D spatial position |
-| 条件 | anchor latent、逐 latent 对齐的 future Ego、FPS、相机内参；可选 anchor depth/semantic |
-| 生成目标 | masked conditional Rectified Flow velocity；loss 仅覆盖 future latent |
-| timestep | 默认 logit-normal；必须覆盖高噪声，移除当前 `mixed_low=0.5` 默认策略 |
-| 推理 | 30～50 步 RF Euler/Heun；固定 history/anchor，每步重注入已知 latent；支持 CFG |
-| 训练 | image → short video → target video 的 progressive curriculum + variable bucket |
-| 本机 | 5070 Ti 16 GB：batch 1、checkpoint、LoRA/adapter、短视频 smoke |
-| 云端 | 多 4090：DDP 起步；模型扩大后切 FSDP/ZeRO-2 + sequence parallel |
+| `x_embedder`、`t_embedder`、`t_block`、`fps_embedder` | 原 shape 严格加载 |
+| `base_blocks_s`、`base_blocks_t`、`final_layer` | 原 shape 严格加载；这是视频生成能力主干 |
+| spatial block 的 `cross_view_attn/norm3/mva_proj/scale_shift_table_mva` | 单视角不实例化或转换时丢弃，并单独统计 |
+| `y_embedder` | 初期保留冻结，用预计算空/固定文本 token；不在线加载 T5-XXL |
+| `camera_embedder`、`frame_embedder`、`base_token` | 保留并严格加载；Ego pose 优先复用 frame embedder |
+| `bbox_embedder` | 禁止输入未来真值 box；保留并严格加载其 learned null-box 时序 token 路径，使 cross-attention 序列与 Stage-3 一致 |
+| `controlnet_cond_embedder*`、`control_blocks_*`、`before_proj`、`x_control_embedder` | B2 静态 map 正式启用并严格加载；已修复 temporal skip 重复注入，不允许“加载了但 forward 没走” |
+| 新增 kinematics/action adapter | 新参数，零初始化输出投影，单独报告和训练 |
 
-### 10.4 VAE 与 latent 协议改进
+验收标准：主干组必须 **100% shape match**；总体覆盖率同时报告“相对完整 Stage-3”
+和“相对精简单视角目标模型”两个分母，不能用删除大量 key 后的虚高百分比。
 
-VAE 不是当前远期崩解的唯一根因，但它决定可达到的质量上限，V2 必须先锁定以下协议：
+### 10.4 单视角 MDDiT 的代码适配
 
-- anchor/history 与 future 分段编码，禁止训练 target 通过非因果 VAE 路径读取未来之外的信息；
-- 训练、cache、验证和推理统一使用同一种 posterior 策略；第一阶段保持确定性 `mode`；
-- 对照实验再评估 MagicDrive 使用的 posterior `sample`，不能混用 mode cache 和 sample online；
-- 明确 `1 → 1 latent`、`8 → 3 latents`、`16 → 5 latents` 的 padding 和时间戳映射；
-- future latent 解码必须与训练 target 的分段协议一致；另做“history+future 联合解码”消融，
-  但不得引入训练/推理不一致；
-- cache key 增加 VAE 权重 hash、diffusers 版本、posterior mode、padding protocol 和 dtype；
-- 每个固定 val clip 保存 RGB GT、VAE oracle reconstruction 和生成结果三列对照；
-- 按未来帧统计 VAE PSNR/SSIM/LPIPS/edge retention，确认 VAE oracle 不存在同样的远期坍塌。
+新增模型建议命名为 `MagicDriveSingleViewSTDiT`，其实现以 MagicDrive 的类为来源，
+但 forward contract 改成项目原生 tensor，不把整个 mmdet/ColossalAI 数据栈引进来。
 
-TODO：
+- [x] `V2-MOD-01` 固化与 Stage-3 同构的 `MagicDriveSTDiT3Config` 子集：
+  16→16 channels、patch 1×2×2、1152、28、16、MLP ratio 4、qk norm；
+- [x] `V2-MOD-02` 已移植 `PositionEmbedding2D`、RoPE、`PatchEmbed3D`、
+  `MultiViewSTDiT3Block`、`T2IFinalLayer` 的 Stage-3 同构子集，并以 PyTorch SDPA 提供
+  fused-kernel fallback；
+- [x] `V2-MOD-03` 单视角 base/control spatial block 都不实例化 cross-view 分支，
+  `skip_cross_view=True` 固化在 NC=1 构造路径；
+  禁止用空 `mv_order_map` 伪装单视角；
+- [x] `V2-MOD-04` forward 内固定 `NC=1`，输入保持 `[B,16,Tz,H/8,W/8]`，
+  移除 view/channel pack-unpack 和 `len(mv_order_map)` 依赖；
+- [x] `V2-MOD-05` 已保持动态 2D position、temporal RoPE、spatial→temporal block 顺序、
+  AdaLN、cross-attention 和 final layer 数值路径；
+- [x] `V2-MOD-06` 已实现 base-only/zero-map 与
+  `encode_map → x_control_embedder → control blocks → skip` 的静态 map 路径；完整 control
+  1489 keys 严格加载，temporal skip 只注入一次；
+- [ ] `V2-MOD-07` 已保存 B1 zero-map 和 B2 static-map 的 256×448、30-step 输出及显存，
+  B2/B1 平均像素差为 10.398/255；还缺训练后的同 seed 定量画质对照与 history-control，
+  因此不把零样本“有响应”误写成质量验收完成；
+- [x] `V2-MOD-08` 支持 gradient checkpoint、BF16、PyTorch SDPA 自动选择
+  Flash/memory-efficient/math backend；该修改已消除 256×448 显式 attention backward 的
+  native segfault；
+  单卡不依赖已初始化的 sequence-parallel process group；
+- [x] `V2-MOD-09` 加载器拒绝 silent shape mismatch，尤其拒绝把当前 256/512 hidden
+  的 V2-Lite checkpoint 当成 Stage-3；
+- [ ] `V2-MOD-10` NC=1 小模型、真实 28+28+13 control 层 BF16 forward/backward、
+  256×448 完整 30-step 已通过；
+  固定 seed 数值 golden、真实 224×400 latent 和 chunk 前后一致性仍待完成。
 
-- [x] `V2-VAE-01` 实现单帧 anchor 和 1/8-history 的统一 latent/time index contract；
-- [x] `V2-VAE-02` 为 cache 增加权重 hash、diffusers、posterior、padding 和 history 长度 fingerprint，旧 cache 不允许静默复用；
-- [ ] `V2-VAE-03` 固定 100 个 val clips，输出逐帧 VAE oracle 指标及置信区间；
-- [ ] `V2-VAE-04` 比较 separate decode 与 context decode，锁定无泄漏且边界最稳定的方案；
-- [ ] `V2-VAE-05` 比较 posterior mode/sample；只有 val 质量稳定提升才允许切换 sample；
+control branch 不预先拍脑袋删除，按下列源码对应关系做消融：
 
-### 10.5 预训练 Video DiT/STDiT 主干
+1. **B0 base-only**：只执行 28 组 base spatial/temporal block，验证主干生成先验；
+2. **B1 history-control**：保留 `x_control_embedder`、13 层 control block 和 skip，
+   以 masked 17-frame latent 作为 control 输入，检查 anchor 保真是否改善；
+3. **B2 map-control**：只有在项目能从 nuScenes 样本稳定构造与训练/推理同源的静态 BEV
+   map 时启用原 map encoder；动态未来 box 不作为输入。
 
-当前 U-Net 只有一次空间下采样、局部 Conv3D 和轻量条件 attention，缺少强视频先验。V2
-新增 `SingleViewSTDiT`，结构要求：
+B0/B1/B2 必须用相同 checkpoint、seed、采样步数和验证 clips 报告，之后才能决定正式主线。
 
-```text
-noisy future latent patches
-      + anchor/history control branch
-      + aligned Ego/FPS/camera tokens
-                 ↓
-spatial attention ↔ temporal attention
-                 ↓
-future velocity / flow prediction
-```
+### 10.5 17 帧 / 5 latent 的 I2V 协议
 
-- 采用 factorized spatial/temporal blocks，避免把所有时空 token 做全量 attention；
-- 每个 latent time index 都有显式 temporal position 或 RoPE；支持不同 history/future 长度；
-- anchor/history 使用独立 patch embedder/control branch，并以 zero-init residual 注入主干；
-- 不只在输入 channel 拼接 history，深层 block 也能访问 anchor 的多尺度 spatial tokens；
-- Ego token 先按真实时间戳重采样到 5 个 future latent time points，再做一对一或局部窗口
-  cross-attention；禁止所有 latent 无约束地全局关注全部 Ego token；
-- temporal block 同时建模静态背景保持、动态目标运动和遮挡出现；
-- 从兼容的 image/video DiT 权重初始化 spatial/base blocks，新 temporal/control blocks 使用
-  zero-init 或小方差初始化，避免一开始破坏预训练画质；
-- 本机使用 LoRA/adapter 验证接口，云端再决定解冻 temporal blocks、control blocks 或全参数训练。
+MagicDrive 的 CogVideoX wrapper 对 17 RGB 帧整体编码后得到 5 个 latent 时间位置。
+因此正式 V2 不再采用“anchor 单独编码成 1 latent + future 16 帧单独编码成 5 latent =
+6 latents”的旧协议；该形状偏离 Stage-3 的 17-frame 训练分布。
 
-TODO：
-
-- [x] `V2-MOD-01` 写预训练 checkpoint 参数名/shape/coverage 兼容性检查器；
-- [x] `V2-MOD-02` 实现显式 temporal/spatial sin-cos position，并补 Ego 帧顺序响应测试；
-- [x] `V2-MOD-03` 实现 anchor/history control branch 和逐层 zero-init residual；
-- [x] `V2-MOD-04` 实现 Ego frame rate → latent rate 的 valid-aware 确定性对齐器；
-- [ ] `V2-MOD-05` 部分完成：aligned Ego 已通过逐时间 AdaLN 注入；待实现 local cross-attention 并与 global attention 消融；
-- [x] `V2-MOD-06` 支持 `history_frames={1,8}` 和 variable future latent length；
-- [ ] `V2-MOD-07` 部分完成：已有按参数名/shape的部分加载与审计；待取得兼容预训练权重并验证 spatial/base 映射；
-- [ ] `V2-MOD-08` 部分完成：已有16.06M本机STDiT配置和真实数据显存报告；待补U-Net/预训练STDiT同条件对照；
-
-### 10.6 Rectified Flow 与清晰度目标
-
-当前 `mixed_low` 过多采样低噪声，而推理从高噪声开始，容易出现 loss 下降但纯噪声生成
-能力不足。V2 默认切换为与 MagicDrive 类似的 Rectified Flow：
-
-- 使用 `x_t = (1-t) * noise + t * clean` 的统一约定，并将方向、训练 target、采样方向写入
-  单元测试，避免 timestep 正反定义混乱；
-- timestep 使用 logit-normal，保证中高噪声覆盖；根据分辨率/帧长启用经过验证的 timestep
-  transform，训练和推理必须共享配置；
-- history/anchor 始终保持 clean，future 才参与加噪和 flow loss；
-- loss 输出 overall、逐 future latent、逐 timestep bucket 三套统计；
-- 使用 min-SNR 或显式 bucket weighting 平衡极高/极低噪声，但不得再次让低噪声占一半以上；
-- 可选低频率 quality fine-tune：从预测 flow 还原 `x0`，在随机小批次上加入 latent Charbonnier、
-  temporal-gradient loss；VAE-decode LPIPS/edge loss 仅作为后期实验，先评估显存和稳定性；
-- 禁止把 LPIPS 直接作为唯一生成目标，避免提高单帧锐度却破坏时序和多样性。
-
-TODO：
-
-- [x] `V2-RF-01` 实现 Rectified Flow scheduler、future-only masked loss、Euler 和 Heun sampler；
-- [x] `V2-RF-02` 补 `t=0/1`、velocity 可逆、history mask、单帧前向/采样一致性测试；
-- [ ] `V2-RF-03` 对比 uniform、logit-normal、当前 mixed-low 的 timestep-bucket val loss；
-- [x] `V2-RF-04` 增加逐 future latent loss 与 TensorBoard 记录；待训练后确认最后一个 latent 趋势；
-- [ ] `V2-RF-05` 部分完成：20/30/50步及Euler/Heun接口已支持；待训练checkpoint质量/耗时比较；
-- [ ] `V2-RF-06` 在门禁通过后实验 latent x0/temporal-gradient 辅助 loss；
-
-### 10.7 单帧条件与几何/运动先验
-
-单帧输入无法直接观测速度和遮挡变化。V2 最小条件仍是 future Ego，但为提高稳定性，允许加入
-只从推理时可获得信息计算的先验：
-
-- 相机内参和固定外参，用于区分几何透视与普通图像运动；
-- anchor 单目 depth，作为可选 frozen teacher feature，不要求训练时 GT depth；
-- anchor semantic/instance feature，帮助保持道路、车辆和树木身份；
-- 8-history 模式可使用历史 optical flow/track feature；单帧模式必须关闭，避免接口泄漏；
-- future Ego 保持 9D 连续量和 valid mask，并增加相对时间 `Δt`；
-- stop/left/right 编辑必须受训练分布约束；默认 60° 转向需要标记为 OOD，不作为主要质量结论；
-- classifier-free dropout 分别作用于 Ego、geometry 和 anchor control，支持独立 guidance scale。
-
-TODO：
-
-- [ ] `V2-COND-01` 将相机内参与 `Δt/FPS` 加入条件 contract；
-- [ ] `V2-COND-02` 统计真实轨迹曲率/速度范围，为反事实轨迹增加 OOD score；
-- [ ] `V2-COND-03` 接入可关闭的 frozen monocular depth feature，并做有/无消融；
-- [ ] `V2-COND-04` 接入可关闭的 semantic/instance feature，并检查动态物体身份保持；
-- [ ] `V2-COND-05` 实现按条件类型独立 dropout/CFG，防止 guidance 放大纹理噪声；
-
-### 10.8 渐进训练与数据策略
-
-参考 MagicDrive 的 stage1/2/3，V2 不允许从随机初始化直接在小数据上训练完整 1→16：
-
-| Stage | 任务 | 分辨率/长度 | 主要目标 | 解冻范围 |
-|---|---|---|---|---|
-| S0 | VAE oracle + 16 clips overfit | 256×448，1/8→16 | 协议和边界正确 | 不训练 VAE |
-| S1 | image/anchor reconstruction | 224×400，T=1 | 保留预训练空间画质 | control/embedder |
-| S2 | short I2V | 128×224，1→4/8 | 学运动和 anchor 保持 | temporal+control |
-| S3 | target I2V | 256×448，1→16 | 清晰远期预测 | temporal+control+部分 base |
-| S4 | mixed history | 256×448，{1,8}→16 | 单帧与多帧统一 | 按门禁决定全参 |
-| S5 | cloud quality FT | 多分辨率/长度 bucket | 泛化和长时稳定 | 多 4090/FSDP |
-
-数据要求：
-
-- partial 62 train scenes 只用于工程和消融，不能作为 V2 最终质量训练集；
-- 至少使用完整 nuScenes train split，并按 scene 去重统计有效视频时长，而不只统计重叠 clip 数；
-- 对 stop/turn/high-curvature、动态目标、夜间、雨天做 bucket balance，禁止只靠窗口重复提高样本数；
-- 所有 crop/color augmentation 必须整段共享；几何翻转必须同步修改 yaw/steering/轨迹；
-- 混合 `history=1/8` 时使用显式 bucket sampler，确保单帧任务不会被更容易的 8-history 淹没；
-- 可引入其他驾驶视频做无标签视频预训练，但 nuScenes fine-tune 和 val scene 必须严格隔离。
-
-TODO：
-
-- [ ] `V2-DATA-01` 下载并验收完整 nuScenes CAM_FRONT trainval；
-- [ ] `V2-DATA-02` 报告独立 scene、有效分钟数、动态/天气/轨迹 bucket，而非只报 clips；
-- [ ] `V2-DATA-03` 实现 1/8-history、4/8/16-future、分辨率/FPS variable bucket sampler；
-- [ ] `V2-DATA-04` 实现 stop/turn/dynamic/night/rain 的可重复平衡采样；
-- [ ] `V2-TRN-01` 完成 S0→S4，每一级通过门禁后才进入下一级；
-- [ ] `V2-TRN-02` 保存每个 stage 的初始化来源、解冻参数列表和 optimizer reset 策略；
-- [ ] `V2-TRN-03` 比较从零、image pretrained、video pretrained 三种初始化；
-
-### 10.9 训练稳定性与多卡方案
-
-- EMA 不能从第一步固定使用 `0.9999`；采用早期 `0.99/0.999`、后期逐步升高，或在 warmup
-  后初始化 EMA，并同时保存 raw/EMA 固定验证结果；
-- bf16、gradient clipping、NaN/Inf、梯度范数、逐 timestep loss、逐 horizon loss 必须记录；
-- 本机继续使用 CPU affinity guard、短 segment checkpoint 和原子保存，但硬件稳定性问题应从
-  BIOS 默认设置、CPU/RAM 超频和内存测试上根治；
-- 本机只做 adapter/LoRA 和最多 100～500 step smoke，不以本机吞吐决定云端模型结构；
-- 多 4090 先用 DDP；单卡放不下 optimizer/model 时切 FSDP 或 ZeRO-2；token 数成为瓶颈时再启用
-  spatial sequence parallel；
-- VAE 编码可预缓存；online/cache 必须通过同 clip latent `allclose` 或统计等价检查；
-- checkpoint 保存模型、EMA、optimizer、scheduler、sampler bucket、RNG、stage 和数据 fingerprint。
-
-TODO：
-
-- [x] `V2-SYS-01` 实现 EMA warmup decay 和向后兼容 checkpoint state；待训练后输出 raw/EMA 对比；
-- [ ] `V2-SYS-02` checkpoint 增加 stage、bucket sampler 和数据/VAE fingerprint；
-- [ ] `V2-SYS-03` 部分完成：单张5070 Ti真实VAE+STDiT forward/2-step Heun sample通过，峰值9.483GB；未启动backward/optimizer；
-- [ ] `V2-SYS-04` 2×/4×4090 完成 DDP 吞吐、恢复和数值一致性测试；
-- [ ] `V2-SYS-05` 模型扩大后完成 FSDP/ZeRO-2 与 sequence parallel 验收；
-
-### 10.10 清晰度、稳定性和控制性门禁
-
-V2 禁止只依据总 diffusion loss 判断质量。固定 val 集按预测时距输出：
-
-- 图像：PSNR、SSIM、LPIPS、DISTS、edge retention/high-frequency energy；
-- 时序：warping error、temporal LPIPS、flow consistency、flicker、anchor→future boundary error；
-- 结构：道路/车道区域稳定、静态背景漂移、车辆 identity/size consistency；
-- 控制：left/right motion sign、stop flow reduction、轨迹条件 sensitivity 和 shuffled-Ego 消融；
-- 生成：FVD 或等价 video feature distance；固定 seed、raw/EMA、不同采样步数；
-- 多解：每个条件生成 K=4 seeds，报告 mean、best-of-K、diversity，防止模型退化成模糊均值；
-- 指标按 `0～1 s / 1～2 s / 2～2.67 s` 和逐帧两种方式报告。
-
-阶段门禁：
-
-- G0 VAE：16 帧 oracle PSNR 中位数不低于 25 dB，且末帧 edge retention 不比首帧下降超过 10%；
-- G1 过拟合：16 clips 上单帧输入可保持道路/车辆结构，末帧生成 edge 不低于首帧的 85%；
-- G2 高噪声：最高噪声 bucket 的 val loss 持续下降，纯噪声起步采样不出现统一纹理崩解；
-- G3 泛化：独立 val scene 的末帧/首帧 edge ratio ≥ 0.85，且远期 LPIPS 不再单调失控；
-- G4 控制：相同 anchor/seed 下方向指标正确，shuffled Ego 明显降低控制对齐；
-- G5 多样性：K=4 结果保持结构稳定且存在合理动态差异，不允许四个 seed 完全相同或全面崩坏。
-
-TODO：
-
-- [ ] `V2-EVAL-01` 部分完成：实现逐帧 edge/PSNR/MAE/edge-retention 并写入反事实metadata；待接LPIPS和分时距聚合；
-- [ ] `V2-EVAL-02` 实现 optical-flow warping、flicker 和静态背景漂移指标；
-- [ ] `V2-EVAL-03` 实现 train/val、raw/EMA、U-Net/STDiT 的固定网格对照；
-- [ ] `V2-EVAL-04` 实现 K-seed mean/best/diversity 报告；
-- [ ] `V2-EVAL-05` 将 G0～G5 做成可失败的自动 gate，不通过时禁止扩大训练；
-
-### 10.11 V2 推荐实施顺序
+目标协议为：
 
 ```text
-V2-VAE-01..04 + V2-EVAL-01
-        ↓
-当前 U-Net 上完成 timestep/temporal-position 快速消融
-        ↓
-V2-RF-01..05
-        ↓
-V2-MOD-01..08（预训练 single-view STDiT）
-        ↓
-S0 16 clips → S1 image → S2 short I2V
-        ↓
-完整 nuScenes + S3 1→16 → S4 {1,8}→16
-        ↓
-多 4090 S5 quality fine-tune → G0..G5 最终验收
+RGB [anchor, future_1 ... future_16]  --joint VAE encode--> z [B,16,5,H/8,W/8]
+latent mask = [False, True, True, True, True]
+False: t=0 clean / fixed / no loss
+True : RF noisy / generated / loss
+joint VAE decode(5 latents) -> 17 RGB frames -> 丢弃 anchor，只输出 future 1..16
 ```
 
-在进入 STDiT 云端训练前，先用当前 U-Net 做三个低成本判因实验：
+- [x] `V2-VAE-01` 以 MagicDrive wrapper 的 `latent_dist.sample()*scaling_factor`、
+  `micro_frame_size=8`、`micro_batch_size=1` 为唯一正式协议；
+- [x] `V2-VAE-02` encode 后按 MagicDrive wrapper 调用
+  `_clear_fake_context_parallel_cache()`；decode 不额外假定源码没有的清理接口，并用本地
+  diffusers 版本的独立测试决定是否需要进程隔离，避免之前 online VAE 的 native segfault；
+- [ ] `V2-VAE-03` 实测 1/9/17 帧的 latent shape，并将 17→5 写成测试；
+- [ ] `V2-VAE-04` 先用 posterior mean 检验
+  `encode(anchor)[:,:,0]` 与 `encode(anchor+future)[:,:,0]` 的 causal 一致性，再对
+  posterior sample 做多 seed 统计；报告 max/mean error；
+- [ ] `V2-VAE-05` 做 VAE oracle：joint encode/decode 真实 17 帧，逐帧统计
+  PSNR/SSIM/LPIPS/edge，生成模型不得被要求超过 VAE 上限；
+- [ ] `V2-VAE-06` 训练时可在线 VAE 或使用 **17-frame joint cache**；
+  旧的 1+16 分段 cache 必须因 fingerprint 不兼容而被拒绝；
+- [x] `V2-VAE-07` 在线 VAE 始终 `eval()+requires_grad_(False)+no_grad`，
+  不进入 optimizer、EMA 或 denoiser checkpoint；
+- [x] `V2-VAE-08` 推理 clean anchor latent 必须来自真实 anchor；每个 Euler step 后
+  恢复 clean 区域，不能让第一 latent 漂移。
 
-1. train clip 与 val clip、raw 与 EMA 的逐帧对比；
-2. uniform/logit-normal 与 mixed-low 的高噪声 bucket 对比；
-3. 显式 temporal position + aligned Ego 与当前 global Ego attention 对比。
+如果 `V2-VAE-04` 不满足数值一致，不能悄悄改回 6 latents；需保留 joint 17-frame
+协议，并在文档中说明训练时 clean latent 含有 causal joint encode 的差异，另外做
+anchor-only 初始化对照实验。
 
-这三个实验用于确认问题来源和建立 V2 baseline，不将当前 22.48M U-Net 继续训练更多步视为
-V2 的主要质量方案。所有 V2 训练仍必须由用户显式传入 `--start-training`，文档和测试变更
-不得自行启动训练。
+### 10.6 Mask、RF 与 timestep 必须完全对齐
+
+MagicDrive 的训练/采样语义固定如下：
+
+- `t=0`：`add_noise` 返回 clean latent；
+- `t=1000`：接近纯 noise；
+- velocity target：`x_start - noise`；
+- 采样：`1000 → 0`，更新 `z = z + v_pred * dt`；
+- clean history：`x_mask=False`，block 和 final layer 使用 `t0` modulation；
+- future：`x_mask=True`，参与加噪和 loss；
+- Stage-3：logit-normal timestep sampling，`use_timestep_transform=True`，
+  `cog_style_trans=True`；
+- CogVideoX 帧数变换：17 RGB 帧按源码映射为 5 latent 帧，再参与分辨率/时长 transform。
+
+- [x] `V2-RF-01` 新增 `MagicRectifiedFlowScheduler`，逐项适配 MagicDrive
+  `RFlowScheduler/RFLOW`，不与现有 RF 用同名而语义不同的 `t`；
+- [x] `V2-RF-02` 单元测试 clean/noise 两端、target 和 1000→0 timestep 顺序；
+  完整真实模型 Euler loop 已通过 1-step CFG smoke；
+- [x] `V2-RF-03` 对 `mask=[0,1,1,1,1]` 测试 clean latent 不变、future 才计 loss；
+- [x] `V2-RF-04` 训练和推理共用同一 `timestep_transform`，传入真实
+  `height/width/num_frames=17`，禁止以 latent T=5 冒充 RGB num_frames；
+- [x] `V2-RF-05` scheduler 默认复现 Stage-3 的 logit-normal；uniform 只能作为显式 ablation；
+- [x] `V2-RF-06` 默认配置和推理入口已固定 30-step Euler、CFG=2，并用 unit loop 与
+  真实模型 256×448 完整 30-step CFG 验证更新/解码全有限；Heun、50 steps 和其他 CFG 作为后续
+  评测变量，不改变 checkpoint 兼容基线；
+- [x] `V2-RF-07` CFG 的 camera/rel_pos 使用 MagicDrive embedder 的 learned null，
+  kinematics 使用 valid-mask null；当前文本固定为同一个空/base token，因此 cond/uncond
+  不引入不同文本，不用全零 token 冒充 learned null；
+- [x] `V2-RF-08` V2-Lite 与 V2-MDDiT scheduler/config 分开命名，checkpoint 中保存
+  scheduler family 和 timestep direction，resume 时严格校验。
+
+### 10.7 条件适配与未来信息泄漏
+
+MagicDrive 是条件视频生成器，训练时使用 map、camera、relative pose 和未来帧 box。
+世界模型推理时拿不到未来真值 box，因此不能原样把所有 Stage-3 条件喂进去。
+
+条件按可用性分组：
+
+| 条件 | V2 输入策略 | 原因 |
+|---|---|---|
+| anchor RGB | clean 首 latent | 推理时真实可用 |
+| CAM_FRONT 内外参 | 保留首帧 `camera_embedder` | 推理时已知，且有 Stage-3 权重 |
+| future relative ego pose | 用项目轨迹构造与 `obtain_next2top(v2=True)` 同方向的 4×4 矩阵，送 `frame_embedder` | 直接复用 Stage-3 的 per-time pose token |
+| vx/vy/ax/ay/yaw_rate/steering | 新增 kinematics adapter，输出 per-time token并拼入原 cross-attention sequence | 原 frame embedder 只编码 4×4 pose，不能覆盖这些量 |
+| 文本 | 使用 Stage-3 checkpoint 中已保存的空文本 `base_token`；`y_embedder` 不实例化 | 保持空文本条件且避免本机常驻 T5-XXL |
+| 静态 HD/BEV map | 固定为 B2：nuScenes expansion map → 8×200×200 bit-packed cache | 推理时可获得，训练/推理同源且不包含未来动态真值 |
+| 未来 3D box | 禁止作为输入 | 推理不可得，会造成未来泄漏 |
+| future RGB/latent | 只作为训练 target；clean 区仅 anchor | 防止 target 泄漏 |
+
+- [x] `V2-COND-01` 从 anchor-relative Ego `[x,y,yaw]` 构造 17 个 4×4
+  anchor→current (`next2top v2`) transform，第一帧为单位阵；manifest 另保存全局
+  location/map pose 供静态 BEV 使用；
+- [ ] `V2-COND-02` 用 MagicDrive `obtain_next2top` 对相同标定样本做方向/数值 golden
+  test，覆盖直行、左转、右转和平移；
+- [x] `V2-COND-03` 保留原 `CamEmbedderTemp(time_downsample_factor=4.5)` 时间契约：
+  pose/action 先形成 17 个 RGB-time token，再用两次源码同构 `cog_temp_down` 对齐到
+  latent T=5；只有不匹配的其他长度才允许进入模型的插值 fallback；
+- [x] `V2-COND-04` 新增 `KinematicsEmbedder`，输入
+  `[vx,vy,ax,ay,yaw_rate,steering] + valid mask`，输出 1152 维 per-time token；
+- [x] `V2-COND-05` kinematics adapter 的最后投影零初始化，并以 frame-token residual
+  注入，使初始网络等价于未加入
+  新条件的已加载 checkpoint；
+- [x] `V2-COND-06` 训练 condition dropout 同步替换 pose/action/camera 为各自 null，
+  loss 返回并记录 `condition_drop_mask`；推理 CFG 使用相同 null contract；
+- [x] `V2-COND-07` 世界模型 forward 使用显式白名单；未来 box 禁止进入，static map
+  只允许来自 anchor 时刻全局 pose 的固定 8 通道缓存，future RGB 只作为训练 target；
+- [ ] `V2-COND-08` 增加 zero/shuffle/counterfactual Ego 三组测试：输出应有限且 shape
+  不变，训练后轨迹方向响应必须显著高于未训练 adapter；
+- [ ] `V2-COND-09` 左/右转变换测试同时检查坐标系符号，不仅检查输出“有差异”。
+
+### 10.8 数据频率、分辨率与样本准备
+
+Stage-3 的视频训练 bucket 主要是 12 Hz，分辨率包含 224×400、424×800、
+848×1600，长度包含 17 帧。当前项目 256×448 / 6 Hz 虽然 shape 可被动态位置编码处理，
+但 6 Hz 是真实分布迁移，不能只依靠 `fps_embedder` 假设自动解决。
+
+- [x] `V2-DATA-01` manifest schema v3 已包含 image path、target/image timestamp、
+  3×7 camera 参数、anchor map pose/location、CAN action、valid mask；
+- [ ] `V2-DATA-02` 已提供 `256×448 / 12 Hz / 1→16` 时间频率适配配置和
+  `256×448 / 6 Hz / 8→16` 目标配置，官方 scene split 隔离；当前工作站只有约 9.8% RGB，
+  99% 完整率 gate 会在写 manifest 前终止，需在全量数据服务器执行准备脚本后勾选；
+- [x] `V2-DATA-03` build/validate report 已分别记录实际 camera 对齐误差 mean/p95/max、
+  scene 可用帧数和拒绝原因；full 报告待服务器数据生成；
+- [ ] `V2-DATA-04` 将 resize/crop 后的 camera intrinsic 同步变换并做投影测试；
+- [x] `V2-DATA-05` 12/6 Hz 都只从真实 CAM_FRONT sample_data 时间轴做最近邻门限匹配，
+  超过 45/55 ms 即拒绝，不伪造重复帧；
+- [ ] `V2-DATA-06` 17-frame joint latent cache 使用原始数据、VAE config、scaling、
+  sample seed、resize/crop、fps 和 commit 的完整 fingerprint；
+- [ ] `V2-DATA-07` 统计 straight/left/right/stop、速度、yaw-rate、昼夜和天气分布，
+  sampler 对稀有动作做可追踪加权；
+- [ ] `V2-DATA-08` 固定一组 train/val/counterfactual clips 和 seeds，贯穿所有阶段。
+
+### 10.9 分阶段训练与冻结策略
+
+#### S0：原模型可复现性（不改结构）
+
+- MagicDrive 原仓库、原 Stage-3 config、原 VAE、原 checkpoint；
+- 只做推理/forward，不训练；
+- 验收：checkpoint 可读、无 missing 主干 key、输出视频有限、固定 seed 可复现。
+
+#### S1：单视角结构等价与权重转换（不训练）
+
+- 建立 `MagicDriveSingleViewSTDiT`；
+- `NC=1`、禁用 cross-view，先用空文本/真实 camera/relative pose；
+- 验收：主干 100% shape match、B0/B1/B2 forward 均有清晰的 key 覆盖报告；
+- 验收：17→5→17 VAE、mask、RF 端点全部通过。
+
+#### S2：4070Ti 稳定调通
+
+- 224×400 / 17 帧，batch=1，BF16，gradient checkpoint；
+- 冻结 VAE、全部 MDDiT 主干和已加载 embedder；
+- 只训练 kinematics/action adapter；若显存仍不足，对 denoiser CPU offload，
+  此阶段允许慢但要求连续 100 step 无 NaN/OOM/native crash；
+- optimizer 只包含新 adapter，EMA 也只跟踪 trainable 参数或使用差分 adapter EMA；
+- 验收：保存/resume 后下一步 loss、optimizer/scaler/sampler state 正常。
+
+#### S3：单 4090 adapter/LoRA 训练
+
+- 先在 12 Hz reproduction split，再切 6 Hz target split；
+- 训练 action adapter + temporal/cross-attention LoRA；base spatial 默认冻结；
+- B0/B1/B2 中只选择 S1/S2 证据最好的分支；
+- 显式比较 raw/EMA、CFG 1/2、30 steps，不同时扩大多个变量；
+- 验收：固定 val 的末帧质量不再单调崩坏，Ego counterfactual 有方向一致性。
+
+#### S4：多 4090 partial fine-tune
+
+- 当前 4×5090 第一个正式版本使用 DDP、BF16、activation checkpoint，冻结完整 Stage-3
+  主干，只训练 action adapter + temporal/cross-attention LoRA + AdaLN；本机实测完整模型
+  backward reserved 8.823 GiB，复制主干在 32 GB/卡内有足够余量；
+- 只有后续依次解冻 temporal blocks → cross-attn/AdaLN → 高层 spatial blocks，导致单卡
+  optimizer/EMA 不再容纳时，才新增 FSDP/ZeRO-2/sequence parallel；
+- 学习率分组：新 adapter > temporal/cross-attn > pretrained spatial；
+- 每次解冻前后记录 trainable params、峰值显存、吞吐和验证退化；
+- 不默认全量 Adam fine-tune；先用 LoRA/partial 证明收益。
+
+#### S5：长时 rollout fine-tune
+
+- 第一 chunk 真实 anchor→16 future；
+- 后续 chunk 使用上一段生成末帧/latent 作为 anchor；
+- 从 teacher-forced 逐步增加 generated-history 概率；
+- 每段的 action/pose 时间轴必须连续，clean mask 重新锚定当前 anchor；
+- 只在单段画质和控制性通过 gate 后进入。
+
+- [ ] `V2-TRAIN-01` S2 adapter、S3/S4 12Hz LoRA、S3/S4 6Hz LoRA 已独立 YAML；S0/S1
+  使用无训练脚本而非 YAML，S5 rollout 尚未实现；
+- [x] `V2-TRAIN-02` LoRA YAML 固定冻结策略、rank/alpha/target、三组学习率和预计设备；
+- [ ] `V2-TRAIN-03` 已实现轻量 adapter/EMA/optimizer/scheduler/scaler/RNG、resolved config、
+  upstream/audit SHA 的保存和恢复；S2 每 25 step 会先原子写 `step-*.pt`/`last.pt` 再验证，
+  防止 validation native crash 丢失已完成区间。尚缺精确 dataloader cursor，因此暂不勾选；
+- [x] `V2-TRAIN-04` MDD resume 会校验 checkpoint SHA 记录、VAE/RF/fps、17→5
+  latent mask/protocol 和训练 stage，不兼容即终止；
+- [x] `V2-TRAIN-05` `scripts/train_mdd_adapter_smoke.sh` 以 25-step 分段运行，
+  只对 native abort/segfault（134/139）从原子 `last.pt` 恢复；其他 Python/data/config
+  错误立即退出，不并发写 manifest/cache；
+- [x] `V2-TRAIN-06` 提供 `--dry-run`、`--run-steps N` 和显式
+  `--start-training`；默认命令只做配置/数据/权重验证。
+- [x] `V2-TRAIN-07` 新增 12Hz→6Hz `--init-checkpoint`：只迁移声明完整的
+  LoRA/AdaLN/action delta，允许 fps/window/cache/training schedule 改变，重置 optimizer、
+  scheduler、step、RNG；`--resume` 仍严格限制同阶段，二者互斥。
+- [x] `V2-TRAIN-08` 新增 `prepare_mdd_full_trainval.sh`、`validate_mdd_4x5090.sh`、
+  `launch_mdd_4x5090.sh`；launcher 默认拒绝训练，只有 `START_TRAINING=1` 才执行。
+
+### 10.10 评测与放大训练 Gate
+
+画质差和越往后越模糊必须拆成 VAE 上限、单段生成误差、条件失配和 rollout 漂移四类，
+不能只看一个总 val loss。
+
+- [ ] `V2-EVAL-01` VAE oracle：逐帧 PSNR/SSIM/LPIPS/edge；
+- [ ] `V2-EVAL-02` 生成画质：每帧 LPIPS、DISTS 或等价感知指标、edge energy、
+  temporal warping error，至少报告 frame 1/4/8/12/16；
+- [ ] `V2-EVAL-03` 时序：静态背景 flicker、光流一致性、相邻帧 latent delta；
+- [ ] `V2-EVAL-04` 控制：straight/left/right/stop 的轨迹方向、速度趋势、
+  zero/shuffle Ego 差值和 counterfactual pair；
+- [ ] `V2-EVAL-05` 泄漏审计：删除未来 box/map 动态通道后指标不得异常塌陷；
+- [ ] `V2-EVAL-06` checkpoint：raw 与 EMA、固定 K seeds 的 mean/best/diversity；
+- [ ] `V2-EVAL-07` rollout：1/2/3 chunks 的逐帧曲线和 anchor seam；
+- [ ] `V2-EVAL-08` B0/B1/B2、12/6 Hz、224×400/256×448 使用相同固定样本表；
+- [ ] `V2-EVAL-09` 输出 HTML/视频报告，同时保存机器可读 JSON，禁止只挑最佳视频。
+
+进入 4×5090 **首个 1000-step LoRA pilot** 前必须满足 G0/G1/G2；pilot 完成并验证断点恢复
+后满足 G6。只有 pilot 的固定验证样本出现可测画质/控制收益（G3/G4），才把相同配置放大到
+12Hz 50k → 6Hz 100k；G5 是进入多 chunk rollout 前置，不阻塞单 chunk LoRA pilot。
+
+- **G0 权重**：主干严格加载，转换 report 无未解释 shape mismatch；
+- **G1 数值**：VAE/RF/mask/pose golden tests 全过，100-step 无 NaN/native crash；
+- **G2 数据**：scene 隔离、时间误差、缺帧、条件 valid mask 通过；
+- **G3 I2V**：anchor 保持，末帧画质显著优于 V2-Lite 同预算基线；
+- **G4 控制**：Ego shuffle/反事实测试证明模型使用条件且方向正确；
+- **G5 rollout**：2/3 chunk 不出现立即崩溃、冻结帧漂移或时间轴错位；
+- **G6 可恢复**：真实中断后 resume 结果与连续训练在容差内一致。
+
+### 10.11 显存和部署边界
+
+Stage-3 EMA 是完整 FP32 大模型 state dict，不能按当前 16M 模型的显存经验估算。
+
+| 设备 | 允许任务 | 不作为目标 |
+|---|---|---|
+| 本机单卡 16 GB | checkpoint mmap；BF16 推理；adapter/LoRA forward/backward；极小 batch smoke | 完整 MDDiT Adam 全参训练 |
+| 单台 4090/5090 | BF16 推理；冻结主干的 adapter/LoRA 稳定训练 | 未测算就全参 optimizer+EMA 常驻 |
+| 4×5090 32 GB | 当前 DDP LoRA/AdaLN/action pilot 与正式 trainval；后续扩大解冻时再切 FSDP/ZeRO | 无数据/质量 gate 直接全参训练 |
+
+- [x] `V2-SYS-01` mmap→目标参数逐张量 materialize，不再调用 meta
+  `load_state_dict(assign=True)`；主干 BF16 估算 3.612 GB，避免 FP32+BF16+模型三份常驻；
+- [x] `V2-SYS-02` VAE 冻结/no_grad 且不进入 checkpoint/optimizer；文本固定使用 checkpoint
+  `base_token`，无需加载 T5；
+- [x] `V2-SYS-03` 已提供无 optimizer 的真实数据 backward smoke，记录
+  allocated/reserved/host RSS 和按 action/AdaLN/LoRA-A/LoRA-B 分组梯度；B2 LoRA
+  256×448 实测 7.798/8.823 GiB、host RSS 约 8.2 GB，梯度全部有限；同分辨率 30-step
+  CFG B1/B2 decode 峰值约 9.45 GiB；
+- [ ] `V2-SYS-04` DDP torchrun launcher 和单进程 TCPStore/GPU dry-run 已通过；真实
+  4×5090 NCCL、rank 数据分片、一次无 optimizer/all-reduce smoke 和 resume barrier 仍需在
+  服务器执行，当前不声称本机单卡已验证四卡；
+- [ ] `V2-SYS-05` 记录 MagicDrive checkpoint/license 的使用约束，发布产物前复核。
+
+### 10.12 实施顺序和首批交付
+
+```text
+下载完成
+  → V2-CKPT-01..07（原模型可复现 + 权重审计/转换）
+  → V2-VAE-01..08 + V2-RF-01..08（17→5、mask、时间方向）
+  → V2-MOD-01..10（同构 NC=1 主干）
+  → V2-COND-01..09 + V2-DATA-01..08（pose/action、无未来泄漏）
+  → S1 无训练 forward
+  → S2 本机 adapter-only 100-step（仅用户显式启动）
+  → G0/G1/G2/G6
+  → 单 4090 S3
+  → G3/G4
+  → 多 4090 S4
+  → G5 后再做 S5 rollout
+```
+
+接下来代码实现的首批文件计划：
+
+- [x] `driveworld/models/magicdrive_single_view_stdit.py`：同构单视角 base 主干；
+- [x] `driveworld/models/mdd_condition_adapter.py`：pose/action/null 条件；
+- [x] `driveworld/diffusion/magic_rectified_flow.py`：Stage-3 同语义 RF；
+- [x] `driveworld/models/magic_cogvideox_adapter.py`：17-frame joint VAE contract；
+- [x] `scripts/audit_mdd_stage3_checkpoint.py`：mmap 审计；
+- [ ] `scripts/convert_mdd_stage3_singleview.py`：BF16 safetensors + report；
+- [x] `scripts/test_mdd_singleview_load.py`、`test_mdd_end_to_end.py`：无训练、固定 seed smoke；
+- [x] `scripts/inference_mdd.py`：30-step Euler/CFG 推理与 GIF/JSON 输出；
+- [x] `scripts/smoke_mdd_adapter_backward.py`：无 optimizer 的梯度/显存 smoke；
+- [x] `scripts/train_mdd_adapter_smoke.sh`：仅 native crash 可恢复的 25-step S2 watchdog；
+- [x] `scripts/cache_static_maps.py`：manifest-SHA 校验、bit-packed mmap、隔离分段续跑；
+- [x] `scripts/prepare_mdd_full_trainval.sh`：12/6 Hz full manifest、静态地图缓存和数据验证；
+- [x] `scripts/validate_mdd_4x5090.sh`、`launch_mdd_4x5090.sh`：DDP dry-run 与显式训练门禁；
+- [x] `configs/model/v2_mdd_stage3_singleview.yaml`；
+- [x] `configs/model/v2_mdd_stage3_singleview_lora_{12hz,6hz}.yaml`；
+- [x] `configs/train/v2_mdd_local_adapter_smoke.yaml`；
+- [x] `configs/train/v2_mdd_4x5090_lora_{12hz,6hz}.yaml`：DDP、batch/accumulation、
+  action/LoRA/AdaLN 分组学习率和独立输出目录；
+- [x] `tests/test_mdd_checkpoint_*`、`test_mdd_vae_contract.py`、
+  `test_mdd_rf_contract.py`、`test_mdd_condition_adapter.py`、
+  `test_mdd_world_model.py`、`test_mdd_adapter_checkpoint.py`。
+
+本机实现里程碑已经完成：Stage-3 EMA 审计/直接 BF16 materialize、17 帧 joint VAE、
+`[False,True,True,True,True]` mask、MagicDrive RF/CFG、`NC=1` B2 control、LoRA backward、
+地图缓存、增量 checkpoint 与单进程 torchrun dry-run 全部通过。下一项不是在当前 partial
+数据上继续堆步数，而是在全量数据服务器依次执行 prepare → 4-rank dry-run → 1000-step
+12Hz pilot；仍然只有显式 `START_TRAINING=1` 才会执行 optimizer step。
+
+### 10.13 4×5090 执行顺序（训练不自动启动）
+
+```bash
+conda activate driveworld-v2
+cd /home/liang/code/DriveWorld-lite_V2
+
+# 1. 全量数据：构建 12/6 Hz manifest、bit-packed static-map cache，并验证图片/scene。
+./scripts/prepare_mdd_full_trainval.sh
+
+# 2. 四卡只读加载和 DDP contract；没有 optimizer step。
+NPROC_PER_NODE=4 MODE=12hz ./scripts/validate_mdd_4x5090.sh
+
+# 3. 用户明确启动的 12 Hz 1000-step pilot。
+START_TRAINING=1 NPROC_PER_NODE=4 MODE=12hz RUN_STEPS=1000 \
+  ./scripts/launch_mdd_4x5090.sh
+```
+
+1000-step pilot 必须先检查 loss/grad/显存、`last.pt`、固定 val 推理和一次 `RESUME` 小段。
+确认后，用同阶段 `RESUME=artifacts/runs/v2-mdd-4x5090-lora-12hz/last.pt` 继续到 50k。
+12Hz 完成后切 6Hz 时不得 `RESUME`；先验证并只迁移 delta：
+
+```bash
+INIT_CHECKPOINT=artifacts/runs/v2-mdd-4x5090-lora-12hz/last.pt \
+  NPROC_PER_NODE=4 MODE=6hz ./scripts/validate_mdd_4x5090.sh
+
+START_TRAINING=1 NPROC_PER_NODE=4 MODE=6hz RUN_STEPS=1000 \
+  INIT_CHECKPOINT=artifacts/runs/v2-mdd-4x5090-lora-12hz/last.pt \
+  ./scripts/launch_mdd_4x5090.sh
+```
+
+6Hz pilot 通过后，后续进程使用
+`RESUME=artifacts/runs/v2-mdd-4x5090-lora-6hz/last.pt`，不要再次使用
+`INIT_CHECKPOINT`，否则会把 global step 和 optimizer 日程重新置零。

@@ -1,0 +1,49 @@
+# Provenance snapshot of the exact upstream configuration used for V2-MDDiT adaptation.
+upstream_repo: /home/liang/code/MagicDrive-V2
+upstream_commit: 4ed72c60e5e73e4fa6072a7321fcc2ed9668edee
+upstream_config: configs/magicdrive/train/stage3_higher-b-v3.1-12Hz_stdit3_CogVAE_boxTDS_wCT_xCE_wSST_bs4_lr1e-5_sp4simu8.py
+upstream_config_sha256: 5e61f125ea3b8215029076c5510c2dfcd03cb03d039158acbebf4c147e668324
+
+model:
+  type: MagicDriveSTDiT3-XL/2
+  latent_channels: 16
+  hidden_size: 1152
+  depth: 28
+  num_heads: 16
+  patch_size: [1, 2, 2]
+  qk_norm: true
+  pred_sigma: false
+  with_temp_block: true
+  control_skip_cross_view: true
+  control_skip_temporal: false
+  gradient_checkpointing: true
+  dtype: bf16
+  sequence_parallel_size: 4
+
+condition:
+  drop_cond_ratio: 0.15
+  camera_shape: [3, 7]
+  camera_after_proj: true
+  frame_shape: [4, 4]
+  frame_num_heads: 8
+  frame_mlp_ratio: 4.0
+  frame_qk_norm: true
+  frame_time_downsample_factor: 4.5
+
+vae:
+  type: VideoAutoencoderKLCogVideoX
+  micro_frame_size: 8
+  micro_batch_size: 1
+
+scheduler:
+  type: rflow
+  sample_method: logit-normal
+  use_timestep_transform: true
+  cog_style_transform: true
+  validation_steps: 30
+  validation_cfg_scale: 2.0
+
+reference_bucket:
+  resolution: [224, 400]
+  fps: 12
+  frames: 17

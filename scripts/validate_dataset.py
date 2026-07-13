@@ -63,6 +63,10 @@ def validate_manifest(path: Path, data_root: Path, check_images: int = 100) -> d
             steering_valid.append(float(np.r_[past_valid[:, 8], future_valid[:, 8]].mean()))
         if not np.isfinite(past_ego).all() or not np.isfinite(future_ego).all():
             errors.append(f"{prefix}: non-finite ego values")
+        if int(record.get("schema_version", 0)) >= 3:
+            map_pose = np.asarray(record.get("map_pose", []), dtype=np.float64)
+            if not record.get("location") or map_pose.shape != (3,) or not np.isfinite(map_pose).all():
+                errors.append(f"{prefix}: invalid static-map location/pose")
         if index in image_check_indices:
             for relative in paths:
                 image_path = data_root / relative

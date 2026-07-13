@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -5,9 +6,13 @@ import numpy as np
 import pytest
 
 from driveworld.data import NuScenesFrontDataset
+from driveworld.data.nuscenes_static_map import NuScenesStaticMapRenderer
 
 
 MANIFEST = Path("artifacts/manifests/nuscenes-mini-front-8x16-6hz/train.jsonl")
+PARTIAL_MANIFEST = Path(
+    "artifacts/manifests/nuscenes-trainval-partial-front-8x16-6hz/val.jsonl"
+)
 
 
 @pytest.mark.skipif(not MANIFEST.exists(), reason="mini manifest has not been built")
@@ -29,3 +34,79 @@ def test_anchor_is_zero_and_scene_isolated():
     for record in records:
         assert np.allclose(record["past_ego"][-1][:3], 0)
         assert all(record["scene_name"] in record["clip_id"] for _ in [0])
+
+
+@pytest.mark.skipif(not PARTIAL_MANIFEST.exists(), reason="partial trainval manifest is unavailable")
+def test_v2_manifest_exposes_magicdrive_camera_parameter():
+    dataset = NuScenesFrontDataset(
+        PARTIAL_MANIFEST, "data/nuscenes-trainval", return_numpy=True
+    )
+    item = dataset[0]
+    assert item["camera_parameters"].shape == (3, 7)
+    assert bool(item["camera_valid"])
+    assert np.isfinite(item["camera_parameters"]).all()
+
+
+@pytest.mark.skipif(
+    not PARTIAL_MANIFEST.exists()
+    or not Path(
+        "data/nuscenes-trainval/maps/expansion/singapore-onenorth.json"
+    ).exists(),
+    reason="partial manifest or nuScenes semantic map expansion is unavailable",
+)
+def test_v2_dataset_renders_exact_magicdrive_static_map_contract():
+    dataset = NuScenesFrontDataset(
+        PARTIAL_MANIFEST,
+        "data/nuscenes-trainval",
+        return_numpy=True,
+        static_map={"enabled": True},
+    )
+    item = dataset[0]
+    static_map = item["static_maps"]
+    assert static_map.shape == (8, 200, 200)
+    assert static_map.dtype == np.float32
+    assert set(np.unique(static_map)).issubset({0.0, 1.0})
+    assert static_map.sum() > 0
+
+
+@pytest.mark.skipif(
+    not PARTIAL_MANIFEST.exists()
+    or not Path(
+        "data/nuscenes-trainval/maps/expansion/singapore-onenorth.json"
+    ).exists(),
+    reason="partial manifest or nuScenes semantic map expansion is unavailable",
+)
+def test_v2_dataset_reads_bitpacked_static_map_cache(tmp_path):
+    record = json.loads(PARTIAL_MANIFEST.open(encoding="utf-8").readline())
+    manifest_dir = tmp_path / "manifest"
+    manifest_dir.mkdir()
+    manifest = manifest_dir / "val.jsonl"
+    manifest.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    source_stats = PARTIAL_MANIFEST.parent / "ego_stats.json"
+    (manifest_dir / "ego_stats.json").write_bytes(source_stats.read_bytes())
+
+    renderer = NuScenesStaticMapRenderer("data/nuscenes-trainval")
+    expected = renderer.render(record["location"], record["map_pose"])
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    packed = np.packbits(
+        expected.astype(np.uint8).reshape(1, -1), axis=1, bitorder="little"
+    )
+    np.save(cache_dir / "val.packed.npy", packed, allow_pickle=False)
+    metadata = {
+        "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        "records": 1,
+        "map_shape": [8, 200, 200],
+        "packed_bytes_per_map": 40000,
+        "bitorder": "little",
+    }
+    (cache_dir / "val.json").write_text(json.dumps(metadata), encoding="utf-8")
+
+    dataset = NuScenesFrontDataset(
+        manifest,
+        "data/nuscenes-trainval",
+        return_numpy=True,
+        static_map={"enabled": True, "cache_dir": str(cache_dir), "require_cache": True},
+    )
+    actual = dataset._load_static_map(dataset.records[0], 0)
+    assert np.array_equal(actual, expected)

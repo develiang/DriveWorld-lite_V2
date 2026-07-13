@@ -18,6 +18,63 @@ from driveworld.training.losses import BaselineLoss
 from driveworld.utils import seed_everything
 
 
+MDD_RESUME_COMPATIBILITY_KEYS = (
+    "task",
+    "model.architecture",
+    "model.pretrained_checkpoint_sha256",
+    "model.dtype",
+    "model.fps",
+    "model.control_mode",
+    "model.control_depth",
+    "model.scheduler.family",
+    "model.scheduler.timestep_direction",
+    "model.vae.kind",
+    "model.vae.pretrained",
+    "model.vae.posterior",
+    "model.vae.rgb_frames",
+    "model.vae.latent_frames",
+    "model.vae.latent_mask",
+    "model.finetune.mode",
+    "model.finetune.rank",
+    "model.finetune.alpha",
+    "model.finetune.temporal",
+    "model.finetune.cross_attention",
+    "model.finetune.train_adaln",
+    "data.static_map",
+    "train.training_stage",
+)
+
+# Stage transfer intentionally omits fps, cache paths, output directory, training
+# stage, optimizer schedule, and dataset window.  The learned delta's architecture
+# and all model-facing condition contracts must remain identical.
+MDD_INIT_COMPATIBILITY_KEYS = (
+    "task",
+    "model.architecture",
+    "model.pretrained_checkpoint_sha256",
+    "model.dtype",
+    "model.control_mode",
+    "model.control_depth",
+    "model.scheduler.family",
+    "model.scheduler.timestep_direction",
+    "model.vae.kind",
+    "model.vae.pretrained",
+    "model.vae.posterior",
+    "model.vae.rgb_frames",
+    "model.vae.latent_frames",
+    "model.vae.latent_mask",
+    "model.finetune.mode",
+    "model.finetune.rank",
+    "model.finetune.alpha",
+    "model.finetune.temporal",
+    "model.finetune.cross_attention",
+    "model.finetune.train_adaln",
+    "data.static_map.enabled",
+    "data.static_map.xbound",
+    "data.static_map.ybound",
+    "data.static_map.classes",
+)
+
+
 def distributed_setup(torch):
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
@@ -51,6 +108,19 @@ def forward_loss(model, batch, task, criterion=None):
     if task == "baseline":
         prediction = model(batch["past_rgb"], batch["future_ego"], batch["future_ego_valid"])
         return criterion(prediction, batch["future_rgb"])
+    target = model.module if hasattr(model, "module") else model
+    if getattr(target, "input_contract", None) == "mdd_i2v_v1":
+        return model(
+            past_rgb=batch["past_rgb"],
+            future_rgb=batch["future_rgb"],
+            past_ego_raw=batch["past_ego_raw"],
+            future_ego_raw=batch["future_ego_raw"],
+            past_ego_valid=batch["past_ego_valid"],
+            future_ego_valid=batch["future_ego_valid"],
+            camera_parameters=batch.get("camera_parameters"),
+            camera_valid=batch.get("camera_valid"),
+            static_maps=batch.get("static_maps"),
+        )
     if "past_latent" in batch:
         return model(
             past_latent=batch["past_latent"],
@@ -64,6 +134,39 @@ def forward_loss(model, batch, task, criterion=None):
         future_ego=batch["future_ego"],
         future_ego_valid=batch["future_ego_valid"],
     )
+
+
+def optimizer_parameter_groups(model, train_config):
+    trainable = {
+        name: parameter for name, parameter in model.named_parameters() if parameter.requires_grad
+    }
+    if getattr(model, "input_contract", None) != "mdd_i2v_v1":
+        return [{"params": list(trainable.values()), "name": "default"}]
+    grouped = {"action_adapter": [], "lora": [], "adaln": []}
+    unexpected = []
+    for name, parameter in trainable.items():
+        if name.startswith("condition_adapter.kinematics_embedder."):
+            grouped["action_adapter"].append(parameter)
+        elif name.endswith(("lora_A", "lora_B")):
+            grouped["lora"].append(parameter)
+        elif name.endswith("scale_shift_table"):
+            grouped["adaln"].append(parameter)
+        else:
+            unexpected.append(name)
+    if unexpected:
+        raise RuntimeError(f"Unclassified V2-MDDiT trainable parameters: {unexpected}")
+    learning_rates = {
+        "action_adapter": float(
+            train_config.get("action_adapter_learning_rate", train_config["learning_rate"])
+        ),
+        "lora": float(train_config.get("lora_learning_rate", train_config["learning_rate"])),
+        "adaln": float(train_config.get("adaln_learning_rate", train_config["learning_rate"])),
+    }
+    return [
+        {"params": parameters, "lr": learning_rates[name], "name": name}
+        for name, parameters in grouped.items()
+        if parameters
+    ]
 
 
 def validate(model, loader, task, criterion, device, batches, autocast_context, seed):
@@ -100,6 +203,14 @@ def main() -> None:
     parser.add_argument("--train-config", default="configs/train/debug.yaml")
     parser.add_argument("--latent-cache", type=Path, help="Directory containing train.jsonl/val.jsonl cache indices")
     parser.add_argument("--resume", type=Path)
+    parser.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        help=(
+            "Load only the learned model delta, resetting optimizer/scheduler/step/RNG; "
+            "use this for the 12Hz to 6Hz stage transition"
+        ),
+    )
     parser.add_argument("--max-steps", type=int, help="Override optimizer steps from config")
     parser.add_argument(
         "--run-steps",
@@ -112,8 +223,17 @@ def main() -> None:
         action="store_true",
         help="Explicit safety acknowledgement; without this flag no optimizer step is run.",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Load data/config/weights and report the trainable contract without an optimizer step.",
+    )
     args = parser.parse_args()
-    if not args.start_training:
+    if args.resume and args.init_checkpoint:
+        raise SystemExit("Choose either --resume or --init-checkpoint, not both")
+    if args.start_training and args.dry_run:
+        raise SystemExit("Choose either --dry-run or --start-training, not both")
+    if not args.start_training and not args.dry_run:
         raise SystemExit("Refusing to train without explicit --start-training")
 
     import torch
@@ -156,11 +276,23 @@ def main() -> None:
             allow_incomplete=args.overfit_clips is not None,
         )
     else:
+        static_map = (
+            data_config.get("static_map")
+            if model_config.get("architecture") == "magicdrive_single_view_stdit"
+            and model_config.get("control_mode") == "static_map"
+            else None
+        )
         train_dataset = NuScenesFrontDataset(
-            manifest_dir / "train.jsonl", data_config["data_root"], tuple(data_config["resolution"])
+            manifest_dir / "train.jsonl",
+            data_config["data_root"],
+            tuple(data_config["resolution"]),
+            static_map=static_map,
         )
         val_dataset = NuScenesFrontDataset(
-            manifest_dir / "val.jsonl", data_config["data_root"], tuple(data_config["resolution"])
+            manifest_dir / "val.jsonl",
+            data_config["data_root"],
+            tuple(data_config["resolution"]),
+            static_map=static_map,
         )
     if args.overfit_clips:
         count = min(args.overfit_clips, len(train_dataset))
@@ -196,14 +328,61 @@ def main() -> None:
             model_config,
             int(data_config["history_frames"]),
             load_vae=args.latent_cache is None,
+            device=device,
         ).to(device)
         criterion = None
-        ema_target = raw_model.denoiser
-        checkpoint_excludes = ("vae.",)
+        ema_target = getattr(raw_model, "adapter_ema_target", raw_model.denoiser)
+        checkpoint_excludes = getattr(raw_model, "checkpoint_exclude_prefixes", ("vae.",))
+
+    pretrained_load_report = getattr(raw_model, "pretrained_load_report", None)
+    if pretrained_load_report:
+        resolved["pretrained_load_report"] = pretrained_load_report
+        if is_main:
+            save_resolved_config(resolved, output_dir / "resolved_config.yaml")
+
+    if args.init_checkpoint:
+        if getattr(raw_model, "input_contract", None) != "mdd_i2v_v1":
+            raise ValueError("--init-checkpoint is currently restricted to V2-MDDiT")
+        state = load_checkpoint(
+            args.init_checkpoint,
+            raw_model,
+            restore_rng=False,
+            expected_config=resolved,
+            compatibility_keys=MDD_INIT_COMPATIBILITY_KEYS,
+        )
+        if is_main:
+            print(
+                f"initialized_delta={args.init_checkpoint} source_step={int(state['step'])} "
+                "optimizer_reset=true step=0 rng_reset=true",
+                flush=True,
+            )
+
+    if args.dry_run:
+        if is_main:
+            parameter_count = sum(
+                parameter.numel() for parameter in raw_model.parameters() if parameter.requires_grad
+            )
+            print(
+                f"dry_run=true device={device} world_size={world_size} "
+                f"trainable_parameters={parameter_count:,} train_clips={len(train_dataset)} "
+                f"cached_latents={bool(args.latent_cache)}",
+                flush=True,
+            )
+            if pretrained_load_report:
+                print(
+                    f"mdd_base_keys={pretrained_load_report['denoiser']['matched_keys']} "
+                    f"mdd_condition_keys={pretrained_load_report['condition']['matched_keys']}",
+                    flush=True,
+                )
+        if world_size > 1:
+            torch.distributed.destroy_process_group()
+        return
 
     pretrained_denoiser = model_config.get("pretrained_denoiser")
-    if pretrained_denoiser and args.resume:
-        raise ValueError("Do not combine model.pretrained_denoiser with --resume")
+    if pretrained_denoiser and (args.resume or args.init_checkpoint):
+        raise ValueError(
+            "Do not combine model.pretrained_denoiser with --resume/--init-checkpoint"
+        )
     if pretrained_denoiser:
         target = raw_model if args.task == "baseline" else raw_model.denoiser
         report = load_pretrained_denoiser(
@@ -218,8 +397,9 @@ def main() -> None:
                 flush=True,
             )
 
+    optimizer_groups = optimizer_parameter_groups(raw_model, train_config)
     optimizer = torch.optim.AdamW(
-        [parameter for parameter in raw_model.parameters() if parameter.requires_grad],
+        optimizer_groups,
         lr=float(train_config["learning_rate"]),
         weight_decay=float(train_config["weight_decay"]),
     )
@@ -248,6 +428,9 @@ def main() -> None:
     )
     global_step = 0
     if args.resume:
+        compatibility_keys = ()
+        if getattr(raw_model, "input_contract", None) == "mdd_i2v_v1":
+            compatibility_keys = MDD_RESUME_COMPATIBILITY_KEYS
         state = load_checkpoint(
             args.resume,
             raw_model,
@@ -256,6 +439,8 @@ def main() -> None:
             ema=ema,
             scaler=scaler,
             restore_rng=True,
+            expected_config=resolved,
+            compatibility_keys=compatibility_keys,
         )
         global_step = int(state["step"])
         if is_main:
@@ -358,6 +543,37 @@ def main() -> None:
                 last_log_time = time.perf_counter()
                 last_log_step = global_step
 
+            checkpoint_every = int(train_config.get("checkpoint_every", 0))
+            if checkpoint_every and global_step % checkpoint_every == 0:
+                if is_main:
+                    save_checkpoint(
+                        output_dir / f"step-{global_step:07d}.pt",
+                        raw_model,
+                        optimizer,
+                        lr_scheduler,
+                        ema,
+                        global_step,
+                        resolved,
+                        exclude_prefixes=checkpoint_excludes,
+                        include_names=getattr(raw_model, "checkpoint_include_names", None),
+                        scaler=scaler,
+                    )
+                    if getattr(raw_model, "input_contract", None) == "mdd_i2v_v1":
+                        save_checkpoint(
+                            output_dir / "last.pt",
+                            raw_model,
+                            optimizer,
+                            lr_scheduler,
+                            ema,
+                            global_step,
+                            resolved,
+                            exclude_prefixes=checkpoint_excludes,
+                            include_names=getattr(raw_model, "checkpoint_include_names", None),
+                            scaler=scaler,
+                        )
+                if world_size > 1:
+                    torch.distributed.barrier()
+
             validate_every = int(train_config.get("validate_every", 0))
             if validate_every and global_step % validate_every == 0:
                 if world_size > 1:
@@ -378,23 +594,6 @@ def main() -> None:
                         writer.add_scalar("validation/loss", val_loss, global_step)
                 if world_size > 1:
                     torch.distributed.barrier()
-
-            checkpoint_every = int(train_config.get("checkpoint_every", 0))
-            if checkpoint_every and global_step % checkpoint_every == 0:
-                if is_main:
-                    save_checkpoint(
-                        output_dir / f"step-{global_step:07d}.pt",
-                        raw_model,
-                        optimizer,
-                        lr_scheduler,
-                        ema,
-                        global_step,
-                        resolved,
-                        exclude_prefixes=checkpoint_excludes,
-                        scaler=scaler,
-                    )
-                if world_size > 1:
-                    torch.distributed.barrier()
         if is_main:
             save_checkpoint(
                 output_dir / "last.pt",
@@ -405,6 +604,7 @@ def main() -> None:
                 global_step,
                 resolved,
                 exclude_prefixes=checkpoint_excludes,
+                include_names=getattr(raw_model, "checkpoint_include_names", None),
                 scaler=scaler,
             )
         if world_size > 1:

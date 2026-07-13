@@ -40,7 +40,8 @@ huggingface-hub>=0.30.0
 # xformers>=0.0.30
 
 # ---------- Data & nuScenes ----------
-nuscenes-devkit>=1.1.11    # nuScenes metadata, CAN bus, map API
+nuscenes-devkit==1.1.11    # Match the MagicDrive Stage-3 data environment
+shapely==1.8.5.post1       # MagicDrive-pinned; Shapely 2.0 can segfault in repeated map crops
 pyyaml>=6.0.1              # YAML configs
 pyarrow>=19.0.0            # Parquet manifest cache (optional but faster than JSONL)
 orjson>=3.10.0             # fast JSONL reading/writing

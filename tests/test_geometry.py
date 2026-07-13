@@ -1,6 +1,11 @@
 import numpy as np
 
-from driveworld.data.geometry import quaternion_to_yaw, relative_ego_features, wrap_angle
+from driveworld.data.geometry import (
+    magicdrive_camera_parameter,
+    quaternion_to_yaw,
+    relative_ego_features,
+    wrap_angle,
+)
 
 
 def test_quaternion_yaw_and_wrap():
@@ -17,3 +22,16 @@ def test_relative_features_straight_motion():
     assert np.allclose(features[:, 3], 1)
     assert np.allclose(features[:, 4:8], 0)
 
+
+def test_magicdrive_camera_parameter_is_intrinsic_plus_camera_to_lidar():
+    camera = {
+        "rotation": [1, 0, 0, 0],
+        "translation": [1, 2, 3],
+        "camera_intrinsic": [[10, 0, 5], [0, 11, 6], [0, 0, 1]],
+    }
+    lidar = {"rotation": [1, 0, 0, 0], "translation": [0.5, 1, 1.5]}
+    value = magicdrive_camera_parameter(camera, lidar)
+    assert value.shape == (3, 7)
+    assert np.allclose(value[:, :3], camera["camera_intrinsic"])
+    assert np.allclose(value[:, 3:6], np.eye(3))
+    assert np.allclose(value[:, 6], [0.5, 1.0, 1.5])

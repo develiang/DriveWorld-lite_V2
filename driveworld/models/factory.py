@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
+from pathlib import Path
+
 from driveworld.diffusion import (
     LinearNoiseScheduler,
+    MagicRectifiedFlowScheduler,
     MaskedVideoDiffusion,
     MaskedVideoRectifiedFlow,
     RectifiedFlowScheduler,
 )
 
 from .latent_unet import LatentVideoUNet
+from .magic_cogvideox_adapter import MagicCogVideoXVAEAdapter
+from .mdd_checkpoint import load_mdd_condition_adapter, load_mdd_singleview_base
+from .mdd_world_model import MDDI2VWorldModel
 from .single_view_stdit import SingleViewSTDiT
 from .unet3d_baseline import UNet3DBaseline
 from .video_vae import CogVideoXVAEAdapter, IdentityVideoVAE, LatentShapeOnlyVAE
@@ -23,7 +31,148 @@ def build_baseline(config: dict):
     )
 
 
-def build_diffusion(config: dict, history_frames: int = 8, load_vae: bool = True):
+def _build_magicdrive_single_view(config: dict, *, device, load_vae: bool):
+    if not load_vae:
+        raise ValueError(
+            "V2-MDDiT does not accept the legacy split latent cache; "
+            "use online joint 17-frame VAE encoding"
+        )
+    checkpoint = config.get("pretrained_checkpoint")
+    if not checkpoint:
+        raise ValueError("pretrained_checkpoint is required for V2-MDDiT")
+    checkpoint_path = Path(checkpoint)
+    expected_bytes = config.get("pretrained_checkpoint_bytes")
+    if expected_bytes is not None and checkpoint_path.stat().st_size != int(expected_bytes):
+        raise RuntimeError(
+            f"Stage-3 checkpoint size mismatch: expected {int(expected_bytes)}, "
+            f"got {checkpoint_path.stat().st_size}"
+        )
+    audit_path = Path(config.get("checkpoint_audit_report", ""))
+    expected_audit_sha = config.get("checkpoint_audit_report_sha256")
+    if not audit_path.is_file() or not expected_audit_sha:
+        raise ValueError(
+            "checkpoint_audit_report and checkpoint_audit_report_sha256 are required"
+        )
+    actual_audit_sha = hashlib.sha256(audit_path.read_bytes()).hexdigest()
+    if actual_audit_sha != expected_audit_sha:
+        raise RuntimeError(
+            f"Stage-3 audit report SHA mismatch: expected {expected_audit_sha}, "
+            f"got {actual_audit_sha}"
+        )
+    source_snapshot = Path(config.get("source_config_snapshot", ""))
+    expected_snapshot_sha = config.get("source_config_snapshot_sha256")
+    if not source_snapshot.is_file() or not expected_snapshot_sha:
+        raise ValueError("source_config_snapshot and its SHA256 are required")
+    actual_snapshot_sha = hashlib.sha256(source_snapshot.read_bytes()).hexdigest()
+    if actual_snapshot_sha != expected_snapshot_sha:
+        raise RuntimeError(
+            f"Stage-3 source config snapshot SHA mismatch: expected {expected_snapshot_sha}, "
+            f"got {actual_snapshot_sha}"
+        )
+    audit = json.loads(audit_path.read_text(encoding="utf-8"))
+    if audit.get("sha256") != config.get("pretrained_checkpoint_sha256"):
+        raise RuntimeError("Stage-3 checkpoint SHA does not match the pinned audit report")
+    expected_architecture = {
+        "in_channels": 16,
+        "hidden_size": 1152,
+        "base_blocks_s_depth": 28,
+        "base_blocks_t_depth": 28,
+        "patch_size": [1, 2, 2],
+        "final_linear_shape": [64, 1152],
+    }
+    mismatched_architecture = {
+        key: {"expected": value, "audit": audit.get("architecture", {}).get(key)}
+        for key, value in expected_architecture.items()
+        if audit.get("architecture", {}).get(key) != value
+    }
+    if mismatched_architecture:
+        raise RuntimeError(f"Stage-3 architecture audit mismatch: {mismatched_architecture}")
+    vae_config = config.get("vae", {})
+    if vae_config.get("kind") != "magic_cogvideox":
+        raise ValueError("V2-MDDiT requires vae.kind=magic_cogvideox")
+    if not vae_config.get("pretrained"):
+        raise ValueError("vae.pretrained is required for V2-MDDiT")
+
+    dtype = config.get("dtype", "bf16")
+    control_mode = str(config.get("control_mode", "base_only"))
+    if control_mode not in {"base_only", "zero_map", "static_map"}:
+        raise ValueError(f"Unknown V2-MDDiT control_mode: {control_mode}")
+    control_depth = int(config.get("control_depth", 13 if control_mode != "base_only" else 0))
+    denoiser, denoiser_report = load_mdd_singleview_base(
+        checkpoint_path,
+        device=device,
+        dtype=dtype,
+        model_kwargs={
+            "control_depth": control_depth,
+            "map_channels": int(config.get("map_channels", 8)),
+            "zero_map_size": int(config.get("zero_map_size", 200)),
+        },
+    )
+    denoiser.enable_gradient_checkpointing(bool(config.get("gradient_checkpointing", True)))
+    condition, condition_report = load_mdd_condition_adapter(
+        checkpoint_path,
+        device=device,
+        dtype=dtype,
+        adapter_kwargs={
+            "kinematics_hidden_size": int(config.get("kinematics_hidden_size", 256)),
+        },
+    )
+    vae = MagicCogVideoXVAEAdapter(
+        vae_config["pretrained"],
+        vae_config.get("subfolder"),
+        local_files_only=bool(vae_config.get("local_files_only", True)),
+        micro_frame_size=int(vae_config.get("micro_frame_size", 8)),
+        micro_batch_size=int(vae_config.get("micro_batch_size", 1)),
+        posterior=str(vae_config.get("posterior", "sample")),
+    ).to(device=device, dtype=denoiser.x_embedder.proj.weight.dtype)
+    scheduler_config = config.get("scheduler", {})
+    if scheduler_config.get("family", "magic_rectified_flow") != "magic_rectified_flow":
+        raise ValueError("V2-MDDiT requires scheduler.family=magic_rectified_flow")
+    scheduler = MagicRectifiedFlowScheduler(
+        num_timesteps=int(scheduler_config.get("num_timesteps", 1000)),
+        sample_method=str(scheduler_config.get("sample_method", "logit_normal")),
+        logit_mean=float(scheduler_config.get("logit_mean", 0.0)),
+        logit_std=float(scheduler_config.get("logit_std", 1.0)),
+        use_timestep_transform=bool(scheduler_config.get("use_timestep_transform", True)),
+        transform_scale=float(scheduler_config.get("transform_scale", 1.0)),
+        cog_style_transform=bool(scheduler_config.get("cog_style_transform", True)),
+    )
+    model = MDDI2VWorldModel(
+        vae,
+        denoiser,
+        condition,
+        scheduler,
+        fps=float(config.get("fps", 6.0)),
+        condition_dropout=float(config.get("condition_dropout", 0.15)),
+    )
+    finetune = dict(config.get("finetune", {}))
+    mode = str(finetune.get("mode", "kinematics_adapter"))
+    if mode == "kinematics_adapter":
+        model.freeze_for_kinematics_adapter_training()
+    elif mode == "lora":
+        model.freeze_for_lora_training(finetune)
+    else:
+        raise ValueError(f"Unsupported V2-MDDiT finetune mode: {mode}")
+    model.pretrained_load_report = {
+        "denoiser": denoiser_report,
+        "condition": condition_report,
+    }
+    if hasattr(model, "lora_injection_report"):
+        model.pretrained_load_report["lora"] = model.lora_injection_report
+    return model
+
+
+def build_diffusion(
+    config: dict,
+    history_frames: int = 8,
+    load_vae: bool = True,
+    *,
+    device="cpu",
+):
+    architecture = str(config.get("architecture", "latent_unet"))
+    if architecture == "magicdrive_single_view_stdit":
+        return _build_magicdrive_single_view(config, device=device, load_vae=load_vae)
+
     vae_config = config.get("vae", {})
     kind = vae_config.get("kind", "identity_debug")
     if not load_vae:
@@ -44,7 +193,6 @@ def build_diffusion(config: dict, history_frames: int = 8, load_vae: bool = True
     else:
         raise ValueError(f"Unknown VAE kind: {kind}")
     latent_channels = int(getattr(vae, "latent_channels"))
-    architecture = str(config.get("architecture", "latent_unet"))
     if architecture == "latent_unet":
         denoiser = LatentVideoUNet(
             latent_channels=latent_channels,

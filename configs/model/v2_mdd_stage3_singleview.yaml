@@ -1,0 +1,60 @@
+name: v2_mdd_stage3_singleview
+architecture: magicdrive_single_view_stdit
+pretrained_checkpoint: pretrained/MDDiT/ema.pt
+pretrained_checkpoint_bytes: 8152555582
+pretrained_checkpoint_sha256: 0806b23b3c8ce659883720f6017bfe3a06f61c21039114db9191252e27483334
+checkpoint_audit_report: artifacts/reports/mdd_stage3_checkpoint.json
+checkpoint_audit_report_sha256: 6f47a8bf34c262470e56b5ed0c9245fec50ba8214c1215af3b68948107173735
+source_config_snapshot: configs/model/magicdrive_stage3_source_snapshot.yaml
+source_config_snapshot_sha256: 7d61ea8178cabb03d21affbd5afdc60edb0c3d46261133d157306b7911fc7c29
+dtype: bf16
+fps: 6.0
+condition_dropout: 0.15
+kinematics_hidden_size: 256
+gradient_checkpointing: true
+control_mode: static_map
+control_depth: 13
+map_channels: 8
+zero_map_size: 200
+
+# This is deliberately a separate family from the small V2-Lite RF model.
+scheduler:
+  family: magic_rectified_flow
+  timestep_direction: noise_1000_to_clean_0
+  num_timesteps: 1000
+  sample_method: logit_normal
+  logit_mean: 0.0
+  logit_std: 1.0
+  use_timestep_transform: true
+  transform_scale: 1.0
+  cog_style_transform: true
+
+sampling:
+  sampler: euler
+  num_steps: 30
+  guidance_scale: 2.0
+  cfg_execution: sequential
+
+vae:
+  kind: magic_cogvideox
+  pretrained: pretrained/vae
+  subfolder: null
+  local_files_only: true
+  posterior: sample
+  micro_frame_size: 8
+  micro_batch_size: 1
+  rgb_frames: 17
+  latent_frames: 5
+  latent_mask: [false, true, true, true, true]
+
+training_stage: s2_kinematics_adapter_only
+finetune:
+  mode: kinematics_adapter
+trainable_prefixes:
+  - condition_adapter.kinematics_embedder.
+frozen_prefixes:
+  - vae.
+  - denoiser.
+  - condition_adapter.camera_embedder.
+  - condition_adapter.frame_embedder.
+  - condition_adapter.bbox_embedder.
