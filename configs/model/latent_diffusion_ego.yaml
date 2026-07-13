@@ -1,0 +1,14 @@
+name: masked_latent_diffusion
+latent_channels: 16
+base_channels: 64
+channel_multipliers: [1, 2, 4]
+ego_dim: 9
+ego_hidden_dim: 256
+prediction_type: v_prediction
+condition_dropout: 0.1
+num_train_timesteps: 1000
+vae:
+  kind: cogvideox
+  pretrained: pretrained/vae
+  subfolder: null
+  local_files_only: true

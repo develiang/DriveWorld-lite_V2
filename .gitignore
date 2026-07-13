@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Data / artifacts / models / outputs
+artifacts/
+data/
+outputs/
+pretrained/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+
+# Logs
+*.log
+logs/
+wandb/
+tensorboard/
+
+# Environment / secrets
+.env
+.env.*
+*.pem
+*.key
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

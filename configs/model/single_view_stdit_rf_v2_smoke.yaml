@@ -1,0 +1,19 @@
+name: single_view_stdit_rf_v2_smoke
+architecture: single_view_stdit
+diffusion_type: rectified_flow
+hidden_size: 32
+depth: 2
+num_heads: 4
+mlp_ratio: 2.0
+patch_size: [1, 2, 2]
+ego_dim: 9
+fps: 6.0
+condition_history_frames: 1
+condition_dropout: 0.1
+timestep_sampling: logit_normal
+sampler: heun
+gradient_checkpointing: false
+vae:
+  kind: identity_debug
+  temporal_compression_ratio: 1
+

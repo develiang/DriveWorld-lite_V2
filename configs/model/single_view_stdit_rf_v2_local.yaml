@@ -1,0 +1,25 @@
+name: single_view_stdit_rf_v2_local
+architecture: single_view_stdit
+diffusion_type: rectified_flow
+latent_channels: 16
+hidden_size: 256
+depth: 8
+num_heads: 8
+mlp_ratio: 4.0
+patch_size: [1, 2, 2]
+ego_dim: 9
+fps: 6.0
+condition_history_frames: 1
+condition_dropout: 0.1
+timestep_sampling: logit_normal
+logit_mean: 0.0
+logit_std: 1.0
+sampler: heun
+gradient_checkpointing: true
+vae:
+  kind: cogvideox
+  pretrained: pretrained/vae
+  subfolder: null
+  local_files_only: true
+  temporal_compression_ratio: 4
+

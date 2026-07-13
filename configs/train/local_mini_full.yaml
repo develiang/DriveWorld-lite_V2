@@ -1,0 +1,17 @@
+seed: 42
+precision: bf16
+micro_batch_size: 4
+gradient_accumulation_steps: 1
+num_workers: 4
+learning_rate: 0.0001
+weight_decay: 0.01
+warmup_steps: 500
+max_steps: 10000
+checkpoint_every: 2500
+validate_every: 500
+validation_batches: 16
+log_every: 100
+gradient_clip_norm: 1.0
+gradient_checkpointing: true
+ema_decay: 0.999
+output_dir: artifacts/runs/local-mini-full-4x8

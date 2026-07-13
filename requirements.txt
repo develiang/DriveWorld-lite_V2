@@ -1,0 +1,78 @@
+# DriveWorld-lite V2 — Python dependencies
+# Generated for host: Python 3.11.7, RTX 5070 Ti 16 GB, CUDA 13.0 / Driver 580.95.05
+#
+# IMPORTANT: PyTorch wheels are CUDA-version specific.
+# Because this machine has a Blackwell GPU (RTX 5070 Ti) and CUDA 13.0,
+# install PyTorch with a Blackwell-compatible build (torch >= 2.7.0).
+#
+# Recommended install (CUDA 12.8 wheel runs fine on CUDA 13.0 drivers):
+#   pip install -r requirements.txt
+#
+# Then, if you want flash-attn (Linux + nvcc required):
+#   pip install flash-attn>=2.8.0 --no-build-isolation
+#
+# For A800 training (same code, just scale batch size), the same wheel works.
+
+# ---------- Core DL / PyTorch ecosystem ----------
+# torch >=2.7.0 is required for Blackwell (RTX 50-series) support.
+# Version must be pinned: pip treats 2.13 as newer than 2.7, and torchvision/
+# torchaudio must match the exact torch wheel.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.1
+torchvision==0.22.1
+torchaudio==2.7.1          # optional, kept for ecosystem consistency
+
+# HuggingFace ecosystem for CogVideoX-style Video VAE + DiT
+diffusers>=0.35.0,<0.40.0
+transformers>=4.48.0,<5.0
+accelerate>=1.6.0,<2.0
+safetensors>=0.5.0
+huggingface-hub>=0.30.0
+
+# ---------- Attention / memory optimizations (optional but recommended) ----------
+# flash-attn CANNOT be installed in the same pip command as torch because it
+# builds from source and requires torch + nvcc to already be present.
+# After this file succeeds, run (Linux only):
+#   pip install flash-attn>=2.8.0 --no-build-isolation
+# For Blackwell + CUDA 13.0 use flash-attn >=2.8; fall back to xformers if it fails.
+# Pick flash-attn OR xformers, not both, to avoid conflicts.
+# flash-attn>=2.8.0; sys_platform == "linux"
+# xformers>=0.0.30
+
+# ---------- Data & nuScenes ----------
+nuscenes-devkit>=1.1.11    # nuScenes metadata, CAN bus, map API
+pyyaml>=6.0.1              # YAML configs
+pyarrow>=19.0.0            # Parquet manifest cache (optional but faster than JSONL)
+orjson>=3.10.0             # fast JSONL reading/writing
+
+# ---------- CV / video / metrics ----------
+opencv-python>=4.11.0
+imageio>=2.37.0
+imageio-ffmpeg>=0.6.0      # video writing
+Pillow>=10.2.0
+lpips>=0.1.4               # perceptual loss
+scikit-image>=0.25.0       # SSIM / PSNR utilities
+
+# ---------- Numerics / utilities ----------
+numpy>=1.26.0,<2.2.0       # keep 1.x/early-2.x for compatibility with nuscenes-devkit
+scipy>=1.11.0
+einops>=0.8.0              # tensor reshaping in DiT/UNet
+tqdm>=4.66.0
+omegaconf>=2.3.0           # structured YAML configs + interpolation
+
+# ---------- Logging / experiment tracking (pick at least one) ----------
+tensorboard>=2.19.0
+# wandb>=0.19.0            # uncomment if you choose Weights & Biases
+
+# ---------- Training helpers ----------
+# ema-pytorch>=0.7         # optional external EMA implementation
+
+# ---------- Testing / linting ----------
+pytest>=8.3.0
+pytest-cov>=6.0.0
+black>=25.0.0
+ruff>=0.11.0
+
+# ---------- Optional visual / diagnostic tools ----------
+matplotlib>=3.10.0
+seaborn>=0.13.0

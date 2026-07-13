@@ -1,0 +1,18 @@
+name: masked_latent_diffusion
+latent_channels: 16
+base_channels: 256
+ego_dim: 9
+ego_hidden_dim: 768
+prediction_type: v_prediction
+condition_dropout: 0.1
+num_train_timesteps: 1000
+gradient_checkpointing: true
+timestep_sampling: mixed_low
+low_timestep_fraction: 0.5
+low_timestep_max: 250
+vae:
+  kind: cogvideox
+  pretrained: pretrained/vae
+  subfolder: null
+  local_files_only: true
+  temporal_compression_ratio: 4

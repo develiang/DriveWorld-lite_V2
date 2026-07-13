@@ -1,0 +1,18 @@
+seed: 42
+precision: bf16
+micro_batch_size: 1
+gradient_accumulation_steps: 8
+num_workers: 4
+learning_rate: 0.00005
+weight_decay: 0.01
+warmup_steps: 2000
+max_steps: 100000
+checkpoint_every: 1000
+validate_every: 1000
+validation_batches: 16
+log_every: 10
+gradient_clip_norm: 1.0
+ema_decay: 0.9999
+ema_warmup: true
+output_dir: artifacts/runs/v2-multi-4090
+

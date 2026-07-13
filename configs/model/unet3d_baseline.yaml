@@ -1,0 +1,9 @@
+name: unet3d_baseline
+base_channels: 32
+channel_multipliers: [1, 2, 4]
+ego_dim: 9
+ego_hidden_dim: 128
+use_ego: true
+history_frames: 8
+future_frames: 16
+
