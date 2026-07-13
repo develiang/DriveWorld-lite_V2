@@ -1,0 +1,25 @@
+seed: 42
+precision: bf16
+micro_batch_size: 1
+gradient_accumulation_steps: 1
+num_workers: 0
+learning_rate: 0.0001
+action_adapter_learning_rate: 0.0001
+lora_learning_rate: 0.00005
+adaln_learning_rate: 0.00001
+weight_decay: 0.01
+warmup_steps: 10
+max_steps: 100
+checkpoint_every: 25
+validate_every: 25
+validation_batches: 1
+log_every: 1
+gradient_clip_norm: 1.0
+ema_decay: 0.9999
+ema_warmup: true
+output_dir: artifacts/runs/v2-mdd-local-lora-smoke
+
+# S2 contract: the factory freezes everything except the 299,392-parameter
+# kinematics adapter. --start-training remains mandatory in train.py.
+expected_device: single_16gb_gpu
+training_stage: s3_local_lora_static_map_6hz

@@ -1,0 +1,24 @@
+data_root: data/nuscenes-mini
+version: v1.0-mini
+camera: CAM_FRONT
+fps: 6.0
+history_frames: 4
+future_frames: 8
+window_stride_frames: 2
+max_camera_error_ms: 55.0
+resolution: [128, 224]
+manifest_dir: artifacts/manifests/nuscenes-mini-front-4x8-6hz
+split:
+  train:
+    - scene-0061
+    - scene-0103
+    - scene-0553
+    - scene-0655
+    - scene-0757
+    - scene-0796
+    - scene-1094
+    - scene-1100
+  val:
+    - scene-0916
+    - scene-1077
+

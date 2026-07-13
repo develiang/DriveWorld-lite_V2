@@ -1,0 +1,30 @@
+data_root: data/nuscenes-trainval
+version: v1.0-trainval
+camera: CAM_FRONT
+fps: 12.0
+history_frames: 1
+future_frames: 16
+window_stride_frames: 2
+max_camera_error_ms: 45.0
+min_camera_availability: 0.99
+resolution: [256, 448]
+manifest_dir: artifacts/manifests/nuscenes-trainval-front-1x16-12hz
+split:
+  train: official_train
+  val: official_val
+
+static_map:
+  enabled: true
+  cache_dir: artifacts/static_map_cache/nuscenes-trainval-front-1x16-12hz
+  require_cache: true
+  xbound: [-50.0, 50.0, 0.5]
+  ybound: [-50.0, 50.0, 0.5]
+  classes:
+    - drivable_area
+    - ped_crossing
+    - walkway
+    - stop_line
+    - carpark_area
+    - road_divider
+    - lane_divider
+    - road_block

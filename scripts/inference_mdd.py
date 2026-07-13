@@ -8,6 +8,7 @@ import numpy as np
 from PIL import Image
 
 from driveworld.config import load_yaml
+from driveworld.control import edit_trajectory
 from driveworld.data import NuScenesFrontDataset
 from driveworld.models.factory import build_diffusion
 from driveworld.training.checkpoint import load_checkpoint
@@ -52,6 +53,18 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-steps", type=int)
     parser.add_argument("--guidance-scale", type=float)
+    parser.add_argument(
+        "--trajectory",
+        choices=["original", "straight", "left", "right", "stop"],
+        default="original",
+        help="Counterfactual future Ego condition; RGB anchor/map/camera remain unchanged",
+    )
+    parser.add_argument(
+        "--turn-yaw-degrees",
+        type=float,
+        default=25.0,
+        help="Final signed yaw magnitude used by left/right trajectories",
+    )
     parser.add_argument("--raw", action="store_true", help="Do not apply adapter EMA")
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/mdd_inference"))
     args = parser.parse_args()
@@ -77,6 +90,14 @@ def main():
         static_map=data_config.get("static_map"),
     )
     item = dataset[args.index]
+    original_future_ego = item["future_ego_raw"].numpy().copy()
+    edited_future_ego = edit_trajectory(
+        original_future_ego,
+        args.trajectory,
+        fps=float(data_config["fps"]),
+        turn_yaw_degrees=args.turn_yaw_degrees,
+    )
+    item["future_ego_raw"] = torch.from_numpy(edited_future_ego)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type != "cuda":
         raise RuntimeError("The Stage-3 MDDiT inference entry currently requires CUDA")
@@ -119,7 +140,7 @@ def main():
             generator=generator,
         )
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    gif = args.output_dir / f"clip-{args.index:04d}.gif"
+    gif = args.output_dir / f"clip-{args.index:04d}-{args.trajectory}.gif"
     _save_gif(video, gif, round(1000 / float(data_config["fps"])))
     report = {
         "clip_id": item["clip_id"],
@@ -127,6 +148,10 @@ def main():
         "checkpoint_step": checkpoint_step,
         "weights": weights,
         "seed": args.seed,
+        "trajectory": args.trajectory,
+        "turn_yaw_degrees": args.turn_yaw_degrees,
+        "original_future_ego": original_future_ego.tolist(),
+        "condition_future_ego": edited_future_ego.tolist(),
         "num_steps": num_steps,
         "guidance_scale": guidance,
         "resolution": list(resolution),

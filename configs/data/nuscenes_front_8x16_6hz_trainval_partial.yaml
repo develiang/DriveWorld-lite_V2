@@ -1,0 +1,30 @@
+data_root: data/nuscenes-trainval
+version: v1.0-trainval
+camera: CAM_FRONT
+fps: 6.0
+history_frames: 8
+future_frames: 16
+window_stride_frames: 2
+max_camera_error_ms: 55.0
+resolution: [256, 448]
+manifest_dir: artifacts/manifests/nuscenes-trainval-partial-front-8x16-6hz
+split:
+  train: official_train
+  val: official_val
+
+# Exact MagicDrive 224/400-bucket static BEV contract (anchor map repeated over 17 frames).
+static_map:
+  enabled: true
+  cache_dir: artifacts/static_map_cache/nuscenes-trainval-partial-front-8x16-6hz
+  require_cache: true
+  xbound: [-50.0, 50.0, 0.5]
+  ybound: [-50.0, 50.0, 0.5]
+  classes:
+    - drivable_area
+    - ped_crossing
+    - walkway
+    - stop_line
+    - carpark_area
+    - road_divider
+    - lane_divider
+    - road_block

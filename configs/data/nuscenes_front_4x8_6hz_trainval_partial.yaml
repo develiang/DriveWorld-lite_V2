@@ -1,0 +1,13 @@
+data_root: data/nuscenes-trainval
+version: v1.0-trainval
+camera: CAM_FRONT
+fps: 6.0
+history_frames: 4
+future_frames: 8
+window_stride_frames: 2
+max_camera_error_ms: 55.0
+resolution: [128, 224]
+manifest_dir: artifacts/manifests/nuscenes-trainval-partial-front-4x8-6hz
+split:
+  train: official_train
+  val: official_val
