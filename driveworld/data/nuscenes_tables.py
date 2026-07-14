@@ -83,17 +83,20 @@ class NuScenesTables:
             for token, channel in self.channel_by_calibrated_sensor.items()
             if channel == "LIDAR_TOP"
         }
-        self.sample_data = {
-            record["token"]: record
-            for record in self._iter("sample_data")
-            if record["calibrated_sensor_token"] in camera_calibrations
-            or record["calibrated_sensor_token"] in lidar_calibrations
-        }
-        ego_pose_tokens = {record["ego_pose_token"] for record in self.sample_data.values()}
+        self.sample_data = {}
+        camera_ego_pose_tokens: set[str] = set()
+        for record in self._iter("sample_data"):
+            calibration = record["calibrated_sensor_token"]
+            if calibration in camera_calibrations:
+                self.sample_data[record["token"]] = record
+                camera_ego_pose_tokens.add(record["ego_pose_token"])
+            elif calibration in lidar_calibrations and record["is_key_frame"]:
+                # Only key-frame lidar records are queried for camera/lidar transforms.
+                self.sample_data[record["token"]] = record
         self.ego_poses = {
             record["token"]: record
             for record in self._iter("ego_pose")
-            if record["token"] in ego_pose_tokens
+            if record["token"] in camera_ego_pose_tokens
         }
         self.sample_data_by_sample: dict[str, list[dict]] = {}
         for record in self.sample_data.values():

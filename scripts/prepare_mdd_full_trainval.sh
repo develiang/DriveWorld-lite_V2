@@ -2,6 +2,7 @@
 set -euo pipefail
 
 DATA_ROOT="data/nuscenes-trainval"
+STATIC_MAP_WORKERS="${STATIC_MAP_WORKERS:-4}"
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/driveworld-matplotlib}"
 mkdir -p "${MPLCONFIGDIR}"
 
@@ -12,19 +13,18 @@ for map_name in boston-seaport singapore-hollandvillage singapore-onenorth singa
   fi
 done
 
-for config in \
+python -m scripts.build_front_clips --config \
   configs/data/nuscenes_front_1x16_12hz_trainval.yaml \
   configs/data/nuscenes_front_8x16_6hz_trainval.yaml
-do
-  python -m scripts.build_front_clips --config "${config}"
-done
 
 for config in \
   configs/data/nuscenes_front_1x16_12hz_trainval.yaml \
   configs/data/nuscenes_front_8x16_6hz_trainval.yaml
 do
-  python -m scripts.cache_static_maps --data-config "${config}" --split train
-  python -m scripts.cache_static_maps --data-config "${config}" --split val
+  python -m scripts.cache_static_maps \
+    --data-config "${config}" --split train --workers "${STATIC_MAP_WORKERS}"
+  python -m scripts.cache_static_maps \
+    --data-config "${config}" --split val --workers "${STATIC_MAP_WORKERS}"
 done
 
 python -m scripts.validate_dataset \

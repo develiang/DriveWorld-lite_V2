@@ -1,5 +1,6 @@
 import numpy as np
 
+from driveworld.data.clip_sampler import _MaskedRunningStats
 from driveworld.data.geometry import (
     magicdrive_camera_parameter,
     quaternion_to_yaw,
@@ -35,3 +36,16 @@ def test_magicdrive_camera_parameter_is_intrinsic_plus_camera_to_lidar():
     assert np.allclose(value[:, :3], camera["camera_intrinsic"])
     assert np.allclose(value[:, 3:6], np.eye(3))
     assert np.allclose(value[:, 6], [0.5, 1.0, 1.5])
+
+
+def test_masked_running_stats_matches_numpy_population_stats():
+    values = np.asarray([[1.0, 10.0, 100.0], [3.0, 20.0, 200.0], [5.0, 30.0, 300.0]])
+    valid = np.asarray([[True, False, False], [True, True, False], [False, True, False]])
+    stats = _MaskedRunningStats(3)
+    stats.update(values[:2], valid[:2])
+    stats.update(values[2:], valid[2:])
+
+    mean, std = stats.finalize()
+
+    assert np.allclose(mean, [2.0, 25.0, 0.0])
+    assert np.allclose(std, [1.0, 5.0, 1.0])

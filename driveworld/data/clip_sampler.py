@@ -19,6 +19,46 @@ SCHEMA_VERSION = 3
 EGO_FIELDS = ["x", "y", "yaw", "vx", "vy", "ax", "ay", "yaw_rate", "steering"]
 
 
+class _MaskedRunningStats:
+    """Numerically stable per-column population statistics with validity masks."""
+
+    def __init__(self, columns: int):
+        self.count = np.zeros(columns, dtype=np.int64)
+        self.mean = np.zeros(columns, dtype=np.float64)
+        self.m2 = np.zeros(columns, dtype=np.float64)
+        self.updates = 0
+
+    def update(self, values: np.ndarray, valid: np.ndarray) -> None:
+        values = np.asarray(values, dtype=np.float64)
+        valid = np.asarray(valid, dtype=bool)
+        if values.ndim != 2 or values.shape != valid.shape or values.shape[1] != len(self.count):
+            raise ValueError("Masked statistics values/valid shapes are inconsistent")
+        self.updates += 1
+        for column in range(values.shape[1]):
+            selected = values[valid[:, column], column]
+            batch_count = len(selected)
+            if not batch_count:
+                continue
+            batch_mean = float(selected.mean())
+            batch_m2 = float(np.square(selected - batch_mean).sum())
+            old_count = int(self.count[column])
+            total = old_count + batch_count
+            delta = batch_mean - self.mean[column]
+            self.mean[column] += delta * batch_count / total
+            self.m2[column] += batch_m2 + delta * delta * old_count * batch_count / total
+            self.count[column] = total
+
+    def finalize(self) -> tuple[np.ndarray, np.ndarray]:
+        if not self.updates:
+            raise RuntimeError("Train split produced no clips; cannot compute Ego normalization")
+        mean = self.mean.copy()
+        std = np.ones_like(mean)
+        present = self.count > 0
+        std[present] = np.maximum(np.sqrt(self.m2[present] / self.count[present]), 1e-6)
+        mean[~present] = 0.0
+        return mean, std
+
+
 @dataclass(frozen=True)
 class ClipConfig:
     data_root: Path
@@ -103,10 +143,20 @@ def build_scene_clips(
     scene_name: str,
     split_name: str,
     config: ClipConfig,
+    image_availability: dict[str, bool] | None = None,
 ) -> tuple[list[dict], dict]:
     records = tables.camera_records(scene_name, config.camera)
     camera_t = np.asarray([r["timestamp"] for r in records], dtype=np.int64)
     fallback_t, fallback_position, fallback_yaw = tables.ego_pose_arrays(records)
+    if image_availability is None:
+        images_available = np.asarray(
+            [(config.data_root / record["filename"]).is_file() for record in records],
+            dtype=bool,
+        )
+    else:
+        images_available = np.asarray(
+            [image_availability[record["filename"]] for record in records], dtype=bool
+        )
     total = config.history_frames + config.future_frames
     offsets = np.concatenate(
         [
@@ -127,6 +177,7 @@ def build_scene_clips(
         "ego_invalid": 0,
     }
     accepted_errors: list[float] = []
+    prepared_can = None
 
     # Every camera frame can serve as anchor; stride controls overlap.
     for anchor_record_index in range(0, len(records), config.window_stride_frames):
@@ -143,16 +194,14 @@ def build_scene_clips(
             rejected["duplicate_frame"] += 1
             continue
         selected = [records[int(i)] for i in image_indices]
-        if any(not (config.data_root / record["filename"]).is_file() for record in selected):
+        if not np.all(images_available[image_indices]):
             rejected["missing_image"] += 1
             continue
-        aligned = can.interpolate(
-            scene_name,
-            target_t,
-            fallback_t,
-            fallback_position,
-            fallback_yaw,
-        )
+        if prepared_can is None:
+            prepared_can = can.prepare_scene(
+                scene_name, fallback_t, fallback_position, fallback_yaw
+            )
+        aligned = can.interpolate_prepared(prepared_can, target_t)
         if not np.all(aligned.pose_valid):
             rejected["ego_invalid"] += 1
             continue
@@ -198,9 +247,7 @@ def build_scene_clips(
         "scene_name": scene_name,
         "split": split_name,
         "camera_frames": len(records),
-        "available_camera_frames": sum(
-            (config.data_root / record["filename"]).is_file() for record in records
-        ),
+        "available_camera_frames": int(images_available.sum()),
         "camera_duration_s": float((camera_t[-1] - camera_t[0]) / 1e6),
         "accepted_clips": len(clips),
         "rejected": rejected,
@@ -213,19 +260,31 @@ def build_scene_clips(
     return clips, stats
 
 
-def build_manifests(config: ClipConfig, raw_config: dict[str, Any]) -> dict:
-    tables = NuScenesTables(config.data_root, config.version, camera_filter=config.camera)
-    can = CanBusInterpolator(config.data_root / "can_bus")
+def build_manifests(
+    config: ClipConfig,
+    raw_config: dict[str, Any],
+    *,
+    tables: NuScenesTables | None = None,
+    can: CanBusInterpolator | None = None,
+) -> dict:
+    if tables is None:
+        tables = NuScenesTables(config.data_root, config.version, camera_filter=config.camera)
+    if can is None:
+        can = CanBusInterpolator(config.data_root / "can_bus")
+    image_availability = None
     if config.min_camera_availability:
+        image_availability = {}
         scene_names = sorted({scene for scenes in config.split.values() for scene in scenes})
         camera_frames = 0
         available_frames = 0
         for scene_name in scene_names:
             records = tables.camera_records(scene_name, config.camera)
             camera_frames += len(records)
-            available_frames += sum(
-                (config.data_root / record["filename"]).is_file() for record in records
-            )
+            for record in records:
+                filename = record["filename"]
+                available = (config.data_root / filename).is_file()
+                image_availability[filename] = available
+                available_frames += int(available)
         availability = available_frames / max(camera_frames, 1)
         if availability < config.min_camera_availability:
             raise RuntimeError(
@@ -237,15 +296,21 @@ def build_manifests(config: ClipConfig, raw_config: dict[str, Any]) -> dict:
     all_stats: list[dict] = []
     clip_ids: set[str] = set()
     split_counts: dict[str, int] = {}
-    train_ego_values: list[np.ndarray] = []
-    train_ego_valid: list[np.ndarray] = []
+    train_ego_stats = _MaskedRunningStats(len(EGO_FIELDS))
     for split_name, scene_names in config.split.items():
         split_path = config.manifest_dir / f"{split_name}.jsonl"
         temp_path = split_path.with_suffix(".jsonl.tmp")
         count = 0
         with temp_path.open("w", encoding="utf-8") as stream:
             for scene_name in scene_names:
-                clips, stats = build_scene_clips(tables, can, scene_name, split_name, config)
+                clips, stats = build_scene_clips(
+                    tables,
+                    can,
+                    scene_name,
+                    split_name,
+                    config,
+                    image_availability=image_availability,
+                )
                 all_stats.append(stats)
                 for clip in clips:
                     if clip["clip_id"] in clip_ids:
@@ -254,27 +319,18 @@ def build_manifests(config: ClipConfig, raw_config: dict[str, Any]) -> dict:
                     stream.write(json.dumps(clip, separators=(",", ":")) + "\n")
                     count += 1
                     if split_name == "train":
-                        train_ego_values.append(
-                            np.asarray(clip["past_ego"] + clip["future_ego"], dtype=np.float64)
-                        )
-                        train_ego_valid.append(
+                        train_ego_stats.update(
                             np.asarray(
-                                clip["past_ego_valid"] + clip["future_ego_valid"], dtype=bool
-                            )
+                                clip["past_ego"] + clip["future_ego"], dtype=np.float64
+                            ),
+                            np.asarray(
+                                clip["past_ego_valid"] + clip["future_ego_valid"],
+                                dtype=bool,
+                            ),
                         )
         temp_path.replace(split_path)
         split_counts[split_name] = count
-    if not train_ego_values:
-        raise RuntimeError("Train split produced no clips; cannot compute Ego normalization")
-    values = np.concatenate(train_ego_values)
-    valid = np.concatenate(train_ego_valid)
-    mean = np.zeros(values.shape[1], dtype=np.float64)
-    std = np.ones(values.shape[1], dtype=np.float64)
-    for column in range(values.shape[1]):
-        selected = values[valid[:, column], column]
-        if len(selected):
-            mean[column] = selected.mean()
-            std[column] = max(selected.std(), 1e-6)
+    mean, std = train_ego_stats.finalize()
     ego_stats = {
         "fields": EGO_FIELDS,
         "mean": mean.tolist(),

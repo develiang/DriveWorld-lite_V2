@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -28,13 +29,54 @@ def _context(data_config: str, split: str):
     if not map_config.get("enabled", False) or not map_config.get("cache_dir"):
         raise ValueError("data config must enable static_map and define cache_dir")
     manifest = Path(config["manifest_dir"]) / f"{split}.jsonl"
-    with manifest.open(encoding="utf-8") as stream:
-        records = [json.loads(line) for line in stream if line.strip()]
-    if not records:
-        raise RuntimeError(f"Manifest contains no records: {manifest}")
     output_dir = Path(map_config["cache_dir"])
     output = output_dir / f"{split}.packed.npy"
-    return config, map_config, manifest, records, output_dir, output
+    offsets = output_dir / f"{split}.offsets.npy"
+    return config, map_config, manifest, output_dir, output, offsets
+
+
+def build_manifest_index(manifest: Path, offsets_path: Path) -> tuple[str, int]:
+    """Build byte offsets for non-empty JSONL records while hashing the manifest."""
+    digest = hashlib.sha256()
+    offsets: list[int] = []
+    with manifest.open("rb") as stream:
+        while True:
+            offset = stream.tell()
+            line = stream.readline()
+            if not line:
+                break
+            digest.update(line)
+            if line.strip():
+                offsets.append(offset)
+    if not offsets:
+        raise RuntimeError(f"Manifest contains no records: {manifest}")
+    values = np.asarray(offsets, dtype=np.uint64)
+    temp = offsets_path.with_suffix(offsets_path.suffix + ".tmp")
+    with temp.open("wb") as stream:
+        np.save(stream, values, allow_pickle=False)
+    temp.replace(offsets_path)
+    return digest.hexdigest(), len(values)
+
+
+def iter_manifest_range(
+    manifest: Path,
+    offsets_path: Path,
+    start: int,
+    end: int,
+):
+    """Yield an indexed slice without parsing or retaining the rest of the JSONL."""
+    offsets = np.load(offsets_path, mmap_mode="r", allow_pickle=False)
+    if offsets.ndim != 1 or offsets.dtype != np.dtype(np.uint64):
+        raise RuntimeError(f"Invalid manifest offset index: {offsets_path}")
+    if not 0 <= start < end <= len(offsets):
+        raise ValueError(f"Invalid cache worker interval: [{start},{end})")
+    with manifest.open("rb") as stream:
+        for index in range(start, end):
+            stream.seek(int(offsets[index]))
+            line = stream.readline()
+            if not line.strip():
+                raise RuntimeError(f"Manifest index points to an empty line: {index}")
+            yield index, json.loads(line)
 
 
 def _renderer(config, map_config):
@@ -48,16 +90,13 @@ def _renderer(config, map_config):
 
 def _worker(data_config: str, split: str, start: int, end: int):
     import time
-    config, map_config, _, records, _, output = _context(data_config, split)
-    if not 0 <= start < end <= len(records):
-        raise ValueError(f"Invalid cache worker interval: [{start},{end})")
+    config, map_config, manifest, _, output, offsets = _context(data_config, split)
     temp = output.with_suffix(output.suffix + ".tmp")
     packed = np.lib.format.open_memmap(temp, mode="r+")
     renderer = _renderer(config, map_config)
     t_start = time.time()
-    for index in range(start, end):
+    for index, record in iter_manifest_range(manifest, offsets, start, end):
         t0 = time.time()
-        record = records[index]
         value = renderer.render(record["location"], record["map_pose"])
         packed[index] = np.packbits(
             value.astype(np.uint8, copy=False).reshape(-1), bitorder="little"
@@ -88,6 +127,12 @@ def main():
     parser.add_argument("--data-config", required=True)
     parser.add_argument("--split", choices=["train", "val"], required=True)
     parser.add_argument("--segment-size", type=int, default=500)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of isolated cache segments to render concurrently",
+    )
     parser.add_argument("--max-failures", type=int, default=20)
     parser.add_argument(
         "--worker-timeout",
@@ -105,22 +150,27 @@ def main():
             raise ValueError("cache worker requires --start and --end")
         _worker(args.data_config, args.split, args.start, args.end)
         return
-    if args.segment_size < 1 or args.max_failures < 1 or args.worker_timeout <= 0:
-        raise ValueError("segment-size/max-failures/worker-timeout must be positive")
+    if (
+        args.segment_size < 1
+        or args.workers < 1
+        or args.max_failures < 1
+        or args.worker_timeout <= 0
+    ):
+        raise ValueError("segment-size/workers/max-failures/worker-timeout must be positive")
 
-    config, map_config, manifest, records, output_dir, output = _context(
+    config, map_config, manifest, output_dir, output, offsets_path = _context(
         args.data_config, args.split
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     temp = output.with_suffix(output.suffix + ".tmp")
     metadata_path = output_dir / f"{args.split}.json"
     progress_path = output_dir / f"{args.split}.progress.json"
-    manifest_sha = sha256_file(manifest)
+    manifest_sha, record_count = build_manifest_index(manifest, offsets_path)
     if output.is_file() and metadata_path.is_file() and not args.overwrite:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         expected = {
             "manifest_sha256": manifest_sha,
-            "records": len(records),
+            "records": record_count,
             "map_shape": [8, 200, 200],
             "packed_bytes_per_map": 40000,
             "bitorder": "little",
@@ -132,7 +182,7 @@ def main():
         }
         if mismatched:
             raise RuntimeError(f"Existing static-map cache is incompatible: {mismatched}")
-        print(f"reused_static_maps={len(records)} output={output}", flush=True)
+        print(f"reused_static_maps={record_count} output={output}", flush=True)
         return
     if output.is_file() or metadata_path.is_file():
         if not args.overwrite:
@@ -151,14 +201,14 @@ def main():
     else:
         progress_path.unlink(missing_ok=True)
         packed = np.lib.format.open_memmap(
-            temp, mode="w+", dtype=np.uint8, shape=(len(records), 40000)
+            temp, mode="w+", dtype=np.uint8, shape=(record_count, 40000)
         )
         packed.flush()
         del packed
 
     failures = 0
-    while next_index < len(records):
-        end = min(next_index + args.segment_size, len(records))
+    def run_segment(segment: tuple[int, int]):
+        start, end = segment
         command = [
             sys.executable,
             "-m",
@@ -169,7 +219,7 @@ def main():
             args.split,
             "--worker",
             "--start",
-            str(next_index),
+            str(start),
             "--end",
             str(end),
         ]
@@ -184,32 +234,50 @@ def main():
                 env=worker_environment,
             )
         except subprocess.TimeoutExpired:
-            result = subprocess.CompletedProcess(command, returncode=124)
-        if result.returncode == 0:
-            next_index = end
-            failures = 0
-            progress_temp = progress_path.with_suffix(progress_path.suffix + ".tmp")
-            progress_temp.write_text(
-                json.dumps(
-                    {"manifest_sha256": manifest_sha, "next_index": next_index},
-                    sort_keys=True,
+            return subprocess.CompletedProcess(command, returncode=124)
+        return result
+
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        while next_index < record_count:
+            segments: list[tuple[int, int]] = []
+            start = next_index
+            for _ in range(args.workers):
+                if start >= record_count:
+                    break
+                end = min(start + args.segment_size, record_count)
+                segments.append((start, end))
+                start = end
+            results = list(executor.map(run_segment, segments))
+            failed = [
+                (segment, result.returncode)
+                for segment, result in zip(segments, results)
+                if result.returncode != 0
+            ]
+            if not failed:
+                next_index = segments[-1][1]
+                failures = 0
+                progress_temp = progress_path.with_suffix(progress_path.suffix + ".tmp")
+                progress_temp.write_text(
+                    json.dumps(
+                        {"manifest_sha256": manifest_sha, "next_index": next_index},
+                        sort_keys=True,
+                    )
+                    + "\n",
+                    encoding="utf-8",
                 )
-                + "\n",
-                encoding="utf-8",
+                progress_temp.replace(progress_path)
+                print(f"cached_static_maps={next_index}/{record_count}", flush=True)
+                continue
+            failures += 1
+            if failures >= args.max_failures:
+                raise RuntimeError(
+                    f"Static-map batch failed {failures} times: {failed}"
+                )
+            print(
+                f"isolated_cache_failures={failed} "
+                f"attempt={failures}/{args.max_failures}",
+                flush=True,
             )
-            progress_temp.replace(progress_path)
-            print(f"cached_static_maps={next_index}/{len(records)}", flush=True)
-            continue
-        failures += 1
-        if failures >= args.max_failures:
-            raise RuntimeError(
-                f"Static-map segment [{next_index},{end}) failed {failures} times"
-            )
-        print(
-            f"isolated_cache_failure={result.returncode} segment={next_index}:{end} "
-            f"attempt={failures}/{args.max_failures}",
-            flush=True,
-        )
 
     temp.replace(output)
     progress_path.unlink(missing_ok=True)
@@ -217,7 +285,7 @@ def main():
     metadata = {
         "manifest": str(manifest),
         "manifest_sha256": manifest_sha,
-        "records": len(records),
+        "records": record_count,
         "map_shape": [8, 200, 200],
         "packed_bytes_per_map": 40000,
         "bitorder": "little",

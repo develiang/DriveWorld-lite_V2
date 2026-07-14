@@ -1,12 +1,18 @@
 import hashlib
 import json
 from pathlib import Path
+import sys
 
 import numpy as np
 import pytest
+import yaml
 
 from driveworld.data import NuScenesFrontDataset
-from driveworld.data.nuscenes_static_map import NuScenesStaticMapRenderer
+from driveworld.data.nuscenes_static_map import (
+    MAGICDRIVE_MAP_CLASSES,
+    NuScenesStaticMapRenderer,
+)
+from scripts.cache_static_maps import main as cache_static_maps_main
 
 
 MANIFEST = Path("artifacts/manifests/nuscenes-mini-front-8x16-6hz/train.jsonl")
@@ -110,3 +116,55 @@ def test_v2_dataset_reads_bitpacked_static_map_cache(tmp_path):
     )
     actual = dataset._load_static_map(dataset.records[0], 0)
     assert np.array_equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not PARTIAL_MANIFEST.exists()
+    or not Path(
+        "data/nuscenes-trainval/maps/expansion/singapore-onenorth.json"
+    ).exists(),
+    reason="partial manifest or nuScenes semantic map expansion is unavailable",
+)
+def test_static_map_cache_parallel_workers_write_disjoint_rows(tmp_path, monkeypatch):
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir()
+    with PARTIAL_MANIFEST.open(encoding="utf-8") as source:
+        lines = [next(source) for _ in range(4)]
+    (manifest_dir / "train.jsonl").write_text("".join(lines), encoding="utf-8")
+    cache_dir = tmp_path / "cache"
+    config = {
+        "data_root": str(Path("data/nuscenes-trainval").resolve()),
+        "manifest_dir": str(manifest_dir),
+        "static_map": {
+            "enabled": True,
+            "cache_dir": str(cache_dir),
+            "xbound": [-50.0, 50.0, 0.5],
+            "ybound": [-50.0, 50.0, 0.5],
+            "classes": list(MAGICDRIVE_MAP_CLASSES),
+        },
+    }
+    config_path = tmp_path / "data.yaml"
+    config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "cache_static_maps",
+            "--data-config",
+            str(config_path),
+            "--split",
+            "train",
+            "--segment-size",
+            "1",
+            "--workers",
+            "2",
+        ],
+    )
+
+    cache_static_maps_main()
+
+    packed = np.load(cache_dir / "train.packed.npy", mmap_mode="r", allow_pickle=False)
+    metadata = json.loads((cache_dir / "train.json").read_text(encoding="utf-8"))
+    assert packed.shape == (4, 40000)
+    assert np.all(np.asarray(packed).sum(axis=1) > 0)
+    assert metadata["records"] == 4
