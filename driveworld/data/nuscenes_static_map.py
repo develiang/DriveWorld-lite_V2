@@ -35,8 +35,13 @@ class _NuScenesVectorMap:
         for layer_name in classes:
             layer_features = []
             if layer_name in {"road_divider", "lane_divider"}:
+                seen_geometry_tokens = set()
                 for record in data[layer_name]:
-                    line = lines[record["line_token"]]
+                    geometry_token = record["line_token"]
+                    if geometry_token in seen_geometry_tokens:
+                        continue
+                    seen_geometry_tokens.add(geometry_token)
+                    line = lines[geometry_token]
                     coordinates = np.stack([nodes[token] for token in line["node_tokens"]])
                     layer_features.append(
                         ("line", coordinates, (), self._bounds(coordinates))
@@ -48,7 +53,15 @@ class _NuScenesVectorMap:
                         polygon_tokens.extend(record["polygon_tokens"])
                     else:
                         polygon_tokens.append(record["polygon_token"])
+                seen_geometry_tokens = set()
                 for token in polygon_tokens:
+                    # Some v1.3 Singapore map layers contain hundreds of records
+                    # pointing at the same placeholder polygon token (including
+                    # ``None``). Masks are a union, so drawing identical geometry
+                    # once is exactly equivalent and avoids pathological runtimes.
+                    if token in seen_geometry_tokens:
+                        continue
+                    seen_geometry_tokens.add(token)
                     polygon = polygons[token]
                     exterior = np.stack(
                         [nodes[node] for node in polygon["exterior_node_tokens"]]

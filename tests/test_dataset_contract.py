@@ -2,6 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ from driveworld.data import NuScenesFrontDataset
 from driveworld.data.nuscenes_static_map import (
     MAGICDRIVE_MAP_CLASSES,
     NuScenesStaticMapRenderer,
+    _NuScenesVectorMap,
 )
 from scripts.cache_static_maps import main as cache_static_maps_main
 
@@ -19,6 +21,67 @@ MANIFEST = Path("artifacts/manifests/nuscenes-mini-front-8x16-6hz/train.jsonl")
 PARTIAL_MANIFEST = Path(
     "artifacts/manifests/nuscenes-trainval-partial-front-8x16-6hz/val.jsonl"
 )
+
+
+def test_vector_map_deduplicates_shared_geometry_tokens(tmp_path):
+    path = tmp_path / "map.json"
+    layers = {
+        name: []
+        for name in MAGICDRIVE_MAP_CLASSES
+        if name not in {"drivable_area", "road_block"}
+    }
+    value = {
+        "node": [
+            {"token": "n0", "x": 0, "y": 0},
+            {"token": "n1", "x": 1, "y": 0},
+            {"token": "n2", "x": 0, "y": 1},
+        ],
+        "polygon": [
+            {
+                "token": None,
+                "exterior_node_tokens": ["n0", "n1", "n2"],
+                "holes": [],
+            }
+        ],
+        "line": [],
+        "drivable_area": [
+            {"polygon_tokens": [None]},
+            {"polygon_tokens": [None]},
+        ],
+        "road_block": [
+            {"polygon_token": None},
+            {"polygon_token": None},
+        ],
+        **layers,
+    }
+    path.write_text(json.dumps(value), encoding="utf-8")
+
+    vector_map = _NuScenesVectorMap(path, MAGICDRIVE_MAP_CLASSES)
+
+    assert len(vector_map.features["drivable_area"]) == 1
+    assert len(vector_map.features["road_block"]) == 1
+
+
+@pytest.mark.skipif(
+    not Path(
+        "data/nuscenes-trainval/maps/expansion/singapore-queenstown.json"
+    ).exists(),
+    reason="nuScenes Queenstown semantic map is unavailable",
+)
+def test_queenstown_placeholder_road_blocks_render_without_pathological_repetition():
+    renderer = NuScenesStaticMapRenderer("data/nuscenes-trainval")
+    queenstown = renderer._map("singapore-queenstown")
+    assert len(queenstown.features["road_block"]) == 1
+
+    started = time.perf_counter()
+    value = renderer.render(
+        "singapore-queenstown",
+        [541.5958105634639, 1740.237982977086, -0.5970386968712057],
+    )
+
+    assert time.perf_counter() - started < 2.0
+    assert value.shape == (8, 200, 200)
+    assert value.sum() > 0
 
 
 @pytest.mark.skipif(not MANIFEST.exists(), reason="mini manifest has not been built")
