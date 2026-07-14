@@ -47,19 +47,38 @@ def _renderer(config, map_config):
 
 
 def _worker(data_config: str, split: str, start: int, end: int):
+    import time
     config, map_config, _, records, _, output = _context(data_config, split)
     if not 0 <= start < end <= len(records):
         raise ValueError(f"Invalid cache worker interval: [{start},{end})")
     temp = output.with_suffix(output.suffix + ".tmp")
     packed = np.lib.format.open_memmap(temp, mode="r+")
     renderer = _renderer(config, map_config)
+    t_start = time.time()
     for index in range(start, end):
+        t0 = time.time()
         record = records[index]
         value = renderer.render(record["location"], record["map_pose"])
         packed[index] = np.packbits(
             value.astype(np.uint8, copy=False).reshape(-1), bitorder="little"
         )
+        dt = time.time() - t0
+        if dt > 1.0:
+            print(
+                f"slow_sample index={index} location={record['location']} "
+                f"pose={record['map_pose']} dt={dt:.2f}s",
+                flush=True,
+            )
+        processed = index - start + 1
+        if processed % 50 == 0:
+            elapsed = time.time() - t_start
+            print(
+                f"progress {processed}/{end - start} index={index} "
+                f"elapsed={elapsed:.1f}s avg={elapsed/processed:.2f}s/sample",
+                flush=True,
+            )
     packed.flush()
+    print(f"worker_done {start}:{end} total={time.time()-t_start:.1f}s", flush=True)
 
 
 def main():
