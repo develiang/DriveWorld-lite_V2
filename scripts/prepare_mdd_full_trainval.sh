@@ -37,10 +37,18 @@ python -m scripts.build_front_clips --config "${configs[@]}"
 
 for config in "${configs[@]}"
 do
+  reuse_args=()
+  if [[ "${MODE}" == "both" && "${config}" == *8x16_6hz* ]]; then
+    # Static maps depend only on the anchor pose. Most 6 Hz anchors are also
+    # present in the completed 12 Hz cache built immediately above.
+    reuse_args=(--reuse-data-config "${configs[0]}")
+  fi
   python -m scripts.cache_static_maps \
-    --data-config "${config}" --split train --workers "${STATIC_MAP_WORKERS}"
+    --data-config "${config}" --split train --workers "${STATIC_MAP_WORKERS}" \
+    "${reuse_args[@]}"
   python -m scripts.cache_static_maps \
-    --data-config "${config}" --split val --workers "${STATIC_MAP_WORKERS}"
+    --data-config "${config}" --split val --workers "${STATIC_MAP_WORKERS}" \
+    "${reuse_args[@]}"
 done
 
 manifests=()

@@ -182,16 +182,15 @@ class NuScenesStaticMapRenderer:
             coordinates = self._canvas_coordinates(exterior, pose)
             if kind == "line":
                 if len(coordinates) >= 2:
-                    draw.line(
-                        [tuple(value) for value in coordinates], fill=1, width=2
-                    )
+                    # Pillow also accepts a flat coordinate sequence.  Avoid
+                    # constructing one Python tuple per map vertex: on dense
+                    # nuScenes layers that conversion costs more than drawing.
+                    draw.line(coordinates.reshape(-1).tolist(), fill=1, width=2)
             else:
                 if len(coordinates) >= 3:
-                    draw.polygon([tuple(value) for value in coordinates], fill=1)
+                    draw.polygon(coordinates.reshape(-1).tolist(), fill=1)
                 for hole in holes:
                     hole_coordinates = self._canvas_coordinates(hole, pose)
                     if len(hole_coordinates) >= 3:
-                        draw.polygon(
-                            [tuple(value) for value in hole_coordinates], fill=0
-                        )
+                        draw.polygon(hole_coordinates.reshape(-1).tolist(), fill=0)
         return np.asarray(canvas, dtype=np.uint8)

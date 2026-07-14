@@ -2,7 +2,11 @@ import hashlib
 import json
 
 from driveworld.data.nuscenes_tables import NuScenesTables, iter_json_array
-from scripts.cache_static_maps import build_manifest_index, iter_manifest_range
+from scripts.cache_static_maps import (
+    build_manifest_index,
+    iter_manifest_indices,
+    iter_manifest_range,
+)
 
 
 def test_iter_json_array_across_small_chunks(tmp_path):
@@ -24,6 +28,10 @@ def test_manifest_index_reads_only_requested_nonempty_records(tmp_path):
     assert list(iter_manifest_range(manifest, offsets, 1, 3)) == [
         (1, {"index": 1}),
         (2, {"index": 2}),
+    ]
+    assert list(iter_manifest_indices(manifest, offsets, [2, 0])) == [
+        (2, {"index": 2}),
+        (0, {"index": 0}),
     ]
 
 
