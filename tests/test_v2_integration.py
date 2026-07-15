@@ -8,7 +8,11 @@ torch = pytest.importorskip("torch")
 from driveworld.models.factory import build_diffusion  # noqa: E402
 from driveworld.models.pretrained import audit_pretrained_state  # noqa: E402
 from driveworld.training.ema import EMA  # noqa: E402
-from train import distributed_setup, synchronize_trainable_parameters  # noqa: E402
+from train import (  # noqa: E402
+    distributed_setup,
+    nonfinite_gradient_report,
+    synchronize_trainable_parameters,
+)
 
 
 def test_factory_builds_single_image_stdit_rectified_flow():
@@ -141,3 +145,13 @@ def test_distributed_setup_binds_local_device_before_nccl_init(monkeypatch):
         ("device", torch.device("cuda", 2)),
         ("process_group", {"backend": "nccl", "device_id": torch.device("cuda", 2)}),
     ]
+
+
+def test_nonfinite_gradient_report_preserves_parameter_names():
+    model = torch.nn.Linear(2, 1)
+    model.weight.grad = torch.tensor([[float("nan"), float("inf")]])
+    model.bias.grad = torch.tensor([2.0])
+
+    report = nonfinite_gradient_report(model)
+
+    assert "weight(nan=1,inf=1" in report

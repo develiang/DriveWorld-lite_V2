@@ -132,6 +132,34 @@ def synchronize_trainable_parameters(
     return synchronized_numel
 
 
+def nonfinite_gradient_report(model, limit: int = 8) -> str:
+    bad = []
+    largest = []
+    for name, parameter in model.named_parameters():
+        gradient = parameter.grad
+        if gradient is None:
+            continue
+        detached = gradient.detach()
+        finite = detached.isfinite()
+        if not bool(finite.all()):
+            finite_values = detached[finite]
+            finite_max = (
+                float(finite_values.abs().max()) if finite_values.numel() else float("nan")
+            )
+            bad.append(
+                f"{name}(nan={int(detached.isnan().sum())},"
+                f"inf={int(detached.isinf().sum())},finite_max={finite_max:.3e})"
+            )
+        elif detached.numel():
+            largest.append((float(detached.abs().max()), name))
+    if bad:
+        suffix = f"; additional_bad={len(bad) - limit}" if len(bad) > limit else ""
+        return "; ".join(bad[:limit]) + suffix
+    largest.sort(reverse=True)
+    preview = ", ".join(f"{name}={value:.3e}" for value, name in largest[:limit])
+    return f"all individual gradients finite; largest_abs=[{preview}]"
+
+
 def infinite_loader(loader, sampler=None):
     epoch = 0
     while True:
@@ -292,6 +320,7 @@ def main() -> None:
     if args.max_steps is not None:
         train_config["max_steps"] = args.max_steps
     precision = str(train_config.get("precision", "fp32")).lower()
+    sdpa_backend = "auto"
     if precision not in {"fp32", "bf16", "fp16"}:
         raise ValueError(f"Unsupported training precision: {precision}")
     if model_config.get("architecture") == "magicdrive_single_view_stdit":
@@ -315,6 +344,14 @@ def main() -> None:
         torch.set_float32_matmul_precision("highest")
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
+        # Strict FP32 prioritizes numerical stability over fused attention
+        # throughput. The CUDA dispatcher may otherwise select a fused SDPA
+        # backward implementation independently on each platform.
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_cudnn_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
+        sdpa_backend = "math"
     seed_everything(int(train_config["seed"]) + rank)
     output_dir = Path(train_config["output_dir"])
     resolved = {
@@ -566,7 +603,7 @@ def main() -> None:
             f"device={device} world_size={world_size} trainable_parameters={parameter_count:,} "
             f"train_clips={len(train_dataset)} cached_latents={bool(args.latent_cache)} "
             f"precision={precision} model_dtype={model_dtype} ema_dtype={','.join(ema_dtypes)} "
-            f"tf32={str(tf32_enabled).lower()}",
+            f"tf32={str(tf32_enabled).lower()} sdpa_backend={sdpa_backend}",
             flush=True,
         )
 
@@ -600,11 +637,22 @@ def main() -> None:
                 continue
 
             scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(
-                raw_model.parameters(), float(train_config["gradient_clip_norm"])
+            parameters_with_grad = [
+                parameter for parameter in raw_model.parameters() if parameter.grad is not None
+            ]
+            grad_norm = torch.nn.utils.get_total_norm(
+                [parameter.grad for parameter in parameters_with_grad]
             )
             if not torch.isfinite(grad_norm):
-                raise FloatingPointError(f"Non-finite gradient norm at optimizer step {global_step}")
+                report = nonfinite_gradient_report(raw_model)
+                raise FloatingPointError(
+                    f"Non-finite gradient norm at optimizer step {global_step}: {report}"
+                )
+            torch.nn.utils.clip_grads_with_norm_(
+                parameters_with_grad,
+                float(train_config["gradient_clip_norm"]),
+                grad_norm,
+            )
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
