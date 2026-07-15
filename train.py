@@ -90,7 +90,9 @@ def distributed_setup(torch):
     return rank, local_rank, world_size, device
 
 
-def synchronize_trainable_parameters(torch, model, src: int = 0) -> int:
+def synchronize_trainable_parameters(
+    torch, model, src: int = 0, bucket_cap_mb: float = 1.0
+) -> int:
     """Broadcast only learned deltas before constructing DDP.
 
     DDP's default initialization broadcasts every parameter, including the
@@ -98,6 +100,8 @@ def synchronize_trainable_parameters(torch, model, src: int = 0) -> int:
     the same pinned checkpoints on every rank, so only newly initialized
     trainable tensors need synchronization.
     """
+    if bucket_cap_mb <= 0:
+        raise ValueError("DDP synchronization bucket size must be positive")
     groups = {}
     for parameter in model.parameters():
         if parameter.requires_grad:
@@ -106,7 +110,14 @@ def synchronize_trainable_parameters(torch, model, src: int = 0) -> int:
     synchronized_numel = 0
     for parameters in groups.values():
         flat = torch.cat([parameter.detach().reshape(-1) for parameter in parameters])
-        torch.distributed.broadcast(flat, src=src)
+        bucket_numel = max(int(bucket_cap_mb * 1024**2) // flat.element_size(), 1)
+        for chunk in flat.split(bucket_numel):
+            torch.distributed.broadcast(chunk, src=src)
+        if flat.is_cuda:
+            # Wait for NCCL before reading the flat buffer on PyTorch's current
+            # stream. This is intentionally explicit for consumer multi-GPU
+            # systems using NCCL's shared-memory transport.
+            torch.cuda.synchronize(flat.device)
         offset = 0
         with torch.no_grad():
             for parameter in parameters:
@@ -114,8 +125,8 @@ def synchronize_trainable_parameters(torch, model, src: int = 0) -> int:
                 parameter.copy_(flat[offset:next_offset].view_as(parameter))
                 offset = next_offset
         if flat.is_cuda:
-            # NCCL uses a separate CUDA stream. Ensure both the broadcast and
-            # copies have finished before the temporary flat buffer is freed.
+            # Ensure parameter copies finish before the temporary flat buffer
+            # is released back to the CUDA allocator.
             torch.cuda.synchronize(flat.device)
         synchronized_numel += flat.numel()
     return synchronized_numel
@@ -414,12 +425,16 @@ def main() -> None:
                 flush=True,
             )
 
+    ddp_bucket_cap_mb = float(train_config.get("ddp_bucket_cap_mb", 25.0))
     ddp_initial_sync_numel = 0
     if world_size > 1 and not args.resume:
-        ddp_initial_sync_numel = synchronize_trainable_parameters(torch, raw_model)
+        ddp_initial_sync_numel = synchronize_trainable_parameters(
+            torch, raw_model, bucket_cap_mb=ddp_bucket_cap_mb
+        )
         if is_main:
             print(
-                f"ddp_initial_sync=trainable_only tensors_numel={ddp_initial_sync_numel:,}",
+                f"ddp_initial_sync=trainable_only tensors_numel={ddp_initial_sync_numel:,} "
+                f"bucket_cap_mb={ddp_bucket_cap_mb:g}",
                 flush=True,
             )
 
@@ -525,6 +540,7 @@ def main() -> None:
             device_ids=[local_rank],
             broadcast_buffers=False,
             init_sync=False,
+            bucket_cap_mb=ddp_bucket_cap_mb,
         )
 
     writer = None

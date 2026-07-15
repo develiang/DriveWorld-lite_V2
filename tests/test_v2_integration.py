@@ -101,14 +101,20 @@ def test_distributed_initial_sync_broadcasts_only_trainable_parameters(monkeypat
         for name, value in model[1].named_parameters()
     }
 
+    broadcast_sizes = []
+
     def fake_broadcast(value, src):
         assert src == 0
+        broadcast_sizes.append(value.numel())
         value.fill_(3.0)
 
     monkeypatch.setattr(torch.distributed, "broadcast", fake_broadcast)
-    synchronized = synchronize_trainable_parameters(torch, model)
+    synchronized = synchronize_trainable_parameters(
+        torch, model, bucket_cap_mb=8 / 1024**2
+    )
 
     assert synchronized == sum(parameter.numel() for parameter in model[0].parameters())
+    assert broadcast_sizes == [2, 2, 2]
     assert all(torch.equal(parameter, torch.full_like(parameter, 3.0)) for parameter in model[0].parameters())
     assert all(
         torch.equal(parameter, frozen_before[name])
