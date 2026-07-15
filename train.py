@@ -249,9 +249,9 @@ def validate(model, loader, task, criterion, device, batches, autocast_context, 
     devices = [device.index if device.index is not None else torch.cuda.current_device()] if device.type == "cuda" else []
     try:
         with torch.random.fork_rng(devices=devices), torch.no_grad():
-            torch.manual_seed(seed)
+            torch.random.default_generator.manual_seed(seed)
             if device.type == "cuda":
-                torch.cuda.manual_seed_all(seed)
+                torch.cuda.manual_seed(seed)
             for batch in itertools.islice(loader, batches):
                 batch = batch_to_device(batch, device)
                 with autocast_context():
@@ -694,7 +694,10 @@ def main() -> None:
 
             checkpoint_every = int(train_config.get("checkpoint_every", 0))
             if checkpoint_every and global_step % checkpoint_every == 0:
+                if device.type == "cuda":
+                    torch.cuda.synchronize(device)
                 if is_main:
+                    print(f"step={global_step} checkpoint_begin=true", flush=True)
                     save_checkpoint(
                         output_dir / f"step-{global_step:07d}.pt",
                         raw_model,
@@ -720,14 +723,16 @@ def main() -> None:
                             include_names=getattr(raw_model, "checkpoint_include_names", None),
                             scaler=scaler,
                         )
+                    print(f"step={global_step} checkpoint_complete=true", flush=True)
                 if world_size > 1:
-                    torch.distributed.barrier()
+                    torch.distributed.barrier(device_ids=[local_rank])
 
             validate_every = int(train_config.get("validate_every", 0))
             if validate_every and global_step % validate_every == 0:
                 if world_size > 1:
-                    torch.distributed.barrier()
+                    torch.distributed.barrier(device_ids=[local_rank])
                 if is_main:
+                    print(f"step={global_step} validation_begin=true", flush=True)
                     val_loss = validate(
                         raw_model,
                         val_loader,
@@ -742,7 +747,7 @@ def main() -> None:
                     if writer:
                         writer.add_scalar("validation/loss", val_loss, global_step)
                 if world_size > 1:
-                    torch.distributed.barrier()
+                    torch.distributed.barrier(device_ids=[local_rank])
         if is_main:
             save_checkpoint(
                 output_dir / "last.pt",
@@ -757,7 +762,7 @@ def main() -> None:
                 scaler=scaler,
             )
         if world_size > 1:
-            torch.distributed.barrier()
+            torch.distributed.barrier(device_ids=[local_rank])
     finally:
         if writer:
             writer.close()

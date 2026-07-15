@@ -6,6 +6,26 @@ from pathlib import Path
 import numpy as np
 
 
+def _get_local_cuda_rng_state(torch):
+    if not torch.cuda.is_available():
+        return None
+    device = torch.cuda.current_device()
+    return torch.cuda.get_rng_state(device)
+
+
+def _restore_local_cuda_rng_state(torch, state) -> None:
+    if not torch.cuda.is_available() or state is None:
+        return
+    device = torch.cuda.current_device()
+    # Backward compatibility: older checkpoints stored one state per visible
+    # CUDA device. Never restore those states across devices in a DDP worker.
+    if isinstance(state, (list, tuple)):
+        if not state:
+            return
+        state = state[device] if device < len(state) else state[0]
+    torch.cuda.set_rng_state(state, device=device)
+
+
 def _config_value(config, dotted_key):
     value = config
     for part in dotted_key.split("."):
@@ -84,7 +104,7 @@ def save_checkpoint(
             "python": random.getstate(),
             "numpy": np.random.get_state(),
             "torch": torch.get_rng_state(),
-            "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+            "cuda": _get_local_cuda_rng_state(torch),
         },
     }
     temp = path.with_suffix(path.suffix + ".tmp")
@@ -151,6 +171,5 @@ def load_checkpoint(
         random.setstate(state["rng"]["python"])
         np.random.set_state(state["rng"]["numpy"])
         torch.set_rng_state(state["rng"]["torch"])
-        if torch.cuda.is_available() and state["rng"]["cuda"] is not None:
-            torch.cuda.set_rng_state_all(state["rng"]["cuda"])
+        _restore_local_cuda_rng_state(torch, state["rng"].get("cuda"))
     return state

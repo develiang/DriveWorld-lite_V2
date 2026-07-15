@@ -5,10 +5,44 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from driveworld.training.checkpoint import load_checkpoint, save_checkpoint  # noqa: E402
+from driveworld.training.checkpoint import (  # noqa: E402
+    _get_local_cuda_rng_state,
+    _restore_local_cuda_rng_state,
+    load_checkpoint,
+    save_checkpoint,
+)
 from driveworld.training.ema import EMA  # noqa: E402
 from tests.test_mdd_world_model import _world_model  # noqa: E402
 from train import MDD_INIT_COMPATIBILITY_KEYS  # noqa: E402
+
+
+def test_cuda_rng_checkpoint_helpers_only_touch_current_device():
+    class FakeCuda:
+        def __init__(self):
+            self.restored = []
+
+        @staticmethod
+        def is_available():
+            return True
+
+        @staticmethod
+        def current_device():
+            return 2
+
+        @staticmethod
+        def get_rng_state(device):
+            assert device == 2
+            return "local-state"
+
+        def set_rng_state(self, state, device):
+            self.restored.append((state, device))
+
+    class FakeTorch:
+        cuda = FakeCuda()
+
+    assert _get_local_cuda_rng_state(FakeTorch) == "local-state"
+    _restore_local_cuda_rng_state(FakeTorch, ["zero", "one", "two", "three"])
+    assert FakeTorch.cuda.restored == [("two", 2)]
 
 
 def test_mdd_checkpoint_contains_only_trainable_adapter_and_resumes(tmp_path):
