@@ -30,14 +30,14 @@ def load_mdd_singleview_base(
     checkpoint: str | Path,
     *,
     device="cpu",
-    dtype=torch.bfloat16,
+    dtype=torch.float32,
     model_kwargs: dict | None = None,
 ):
     """Materialize only the 1.2B single-view base from the 2.0B FP32 Stage-3 EMA.
 
     The model is first constructed on the meta device. Each retained source tensor is
-    converted directly to the requested device/dtype, so no FP32 target model or BF16
-    checkpoint file is required.
+    converted directly to the requested device/dtype, so no second target model or
+    converted checkpoint file is required.
     """
     checkpoint = Path(checkpoint)
     dtype = _resolve_dtype(dtype)
@@ -114,7 +114,7 @@ def load_mdd_condition_adapter(
     checkpoint: str | Path,
     *,
     device="cpu",
-    dtype=torch.bfloat16,
+    dtype=torch.float32,
     adapter_kwargs: dict | None = None,
 ):
     """Load Stage-3 camera/frame weights and retain a new zero-init kinematics branch."""

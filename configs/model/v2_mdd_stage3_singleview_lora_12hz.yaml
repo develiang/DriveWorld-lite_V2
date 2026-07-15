@@ -1,4 +1,4 @@
-name: v2_mdd_stage3_singleview_lora_12hz
+name: v2_mdd_stage3_singleview_lora_12hz_fp32
 architecture: magicdrive_single_view_stdit
 pretrained_checkpoint: pretrained/MDDiT/ema.pt
 pretrained_checkpoint_bytes: 8152555582
@@ -7,7 +7,7 @@ checkpoint_audit_report: artifacts/reports/mdd_stage3_checkpoint.json
 checkpoint_audit_report_sha256: 6f47a8bf34c262470e56b5ed0c9245fec50ba8214c1215af3b68948107173735
 source_config_snapshot: configs/model/magicdrive_stage3_source_snapshot.yaml
 source_config_snapshot_sha256: 7d61ea8178cabb03d21affbd5afdc60edb0c3d46261133d157306b7911fc7c29
-dtype: bf16
+dtype: fp32
 fps: 12.0
 condition_dropout: 0.15
 kinematics_hidden_size: 256

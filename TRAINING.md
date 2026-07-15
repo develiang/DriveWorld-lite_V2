@@ -184,7 +184,97 @@ RESUME=artifacts/runs/multi-4090/last.pt \
 
 当前实现覆盖单机多 GPU `torchrun`。跨多台物理服务器需要额外提供 `MASTER_ADDR`、`MASTER_PORT`、`NNODES` 和 `NODE_RANK`，不属于当前已实测范围。
 
-## 4. 监控和产物
+## 4. 单卡 RTX 5090 全 FP32 从头训练
+
+12 Hz LoRA 配置现在使用完整 FP32 链路：Stage-3 主干、condition adapter、VAE、训练
+forward/backward 和 EMA shadow 均为 FP32，不启用 autocast。为避免与旧 BF16 run 混合，输出目录为
+`artifacts/runs/v2-mdd-1x5090-lora-12hz-fp32`。
+
+从头训练时不要传 `--resume` 或 `--init-checkpoint`：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python train.py \
+  --task diffusion \
+  --data-config configs/data/nuscenes_front_1x16_12hz_trainval.yaml \
+  --model-config configs/model/v2_mdd_stage3_singleview_lora_12hz.yaml \
+  --train-config configs/train/v2_mdd_1x5090_lora_12hz.yaml \
+  --start-training
+```
+
+启动日志必须显示
+`precision=fp32 model_dtype=torch.float32 ema_dtype=float32 tf32=false`。配置保持
+`micro_batch_size: 1`、`gradient_accumulation_steps: 16`，有效 batch 仍为 16。不要沿用 BF16
+实验时的 `16/1`，FP32 激活显存约翻倍，很可能直接 OOM。确认实际显存后，优先按
+`1/16 → 2/8 → 4/4` 逐级试探，始终保持有效 batch 为 16。
+
+继续这个新的 FP32 run：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python train.py \
+  --task diffusion \
+  --data-config configs/data/nuscenes_front_1x16_12hz_trainval.yaml \
+  --model-config configs/model/v2_mdd_stage3_singleview_lora_12hz.yaml \
+  --train-config configs/train/v2_mdd_1x5090_lora_12hz.yaml \
+  --resume artifacts/runs/v2-mdd-1x5090-lora-12hz-fp32/last.pt \
+  --start-training
+```
+
+旧目录 `artifacts/runs/v2-mdd-1x5090-lora-12hz` 中的 BF16 checkpoint 不应拿来 resume
+这个 FP32 run；resume compatibility 会检查 `model.dtype` 并拒绝混用。
+
+## 5. V2-MDDiT 控制评测 Gate
+
+`scripts.generate_mdd_counterfactual_demo` 使用同一个 anchor、地图、相机参数和随机噪声，
+只替换未来 Ego 条件。默认生成并评测：
+
+- `straight/left/right`：方向反事实；
+- `stop`：从当前速度平滑减速，**不是**立即静止；
+- `hold`：anchor-relative Ego 全零，表示原地保持；
+- `shuffle`：把另一条 val clip 的未来 Ego 配给当前画面；
+- `invalid`：保留数值但把未来 Ego valid mask 清零；
+- `zero_kinematics`：保留位置/yaw，只清零速度、加速度、yaw-rate 和 steering。
+
+单个 checkpoint 的 EMA 控制评测：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m scripts.generate_mdd_counterfactual_demo \
+  --data-config configs/data/nuscenes_front_1x16_12hz_trainval.yaml \
+  --model-config configs/model/v2_mdd_stage3_singleview_lora_12hz.yaml \
+  --adapter-checkpoint artifacts/runs/v2-mdd-1x5090-lora-12hz-fp32/last.pt \
+  --index 0 --seed 42 --num-steps 30 \
+  --output-dir artifacts/eval/mdd-control-step1000-ema
+```
+
+同一 checkpoint 的 raw 权重加 `--raw`。step-zero 对照不传
+`--adapter-checkpoint`：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m scripts.generate_mdd_counterfactual_demo \
+  --data-config configs/data/nuscenes_front_1x16_12hz_trainval.yaml \
+  --model-config configs/model/v2_mdd_stage3_singleview_lora_12hz.yaml \
+  --index 0 --seed 42 --num-steps 30 \
+  --output-dir artifacts/eval/mdd-control-step0
+```
+
+固定多个 clip/seed 的 JSON Gate（不保存 GIF，仍会执行完整推理）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m scripts.generate_mdd_counterfactual_demo \
+  --data-config configs/data/nuscenes_front_1x16_12hz_trainval.yaml \
+  --model-config configs/model/v2_mdd_stage3_singleview_lora_12hz.yaml \
+  --adapter-checkpoint artifacts/runs/v2-mdd-1x5090-lora-12hz-fp32/last.pt \
+  --indices 0 100 500 --seeds 42 1234 --num-steps 30 --no-gifs \
+  --output-dir artifacts/eval/mdd-control-fixed-suite
+```
+
+每个 case 输出 `metadata.json`，汇总输出 `summary.json`。Gate 包含：条件差异逐帧曲线、
+Farneback 背景运动 proxy、Stop/Hold 相对 Straight 的后段运动、Left/Right 水平光流方向、
+输出有限性和 zero/shuffle ablation。阈值位于
+`configs/eval/mdd_control_gate_pilot.yaml`，只是 pilot 诊断阈值；正式结论必须同时比较
+step-zero/raw/EMA、多 clip、多 seed 和 GIF。缺少 OpenCV 时自动退化为 frame-MAE，方向 Gate
+会标为 `incomplete`。
+
+## 6. 监控和产物
 
 控制台与 TensorBoard 记录：
 
@@ -200,7 +290,7 @@ tensorboard --logdir artifacts/runs
 
 checkpoint 默认不包含冻结 VAE，因此云端和本机都必须保留相同的 `pretrained/vae`。推理默认加载 EMA denoiser。
 
-## 5. 当前已验证结果
+## 7. 当前已验证结果
 
 - 在线真实 VAE 2-step：loss `1.692 → 1.448`，峰值显存 1.71 GB；
 - cached latent 50-step：loss `1.257 → 0.498`，无 NaN/Inf；

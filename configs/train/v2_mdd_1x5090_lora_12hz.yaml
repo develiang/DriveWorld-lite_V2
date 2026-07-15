@@ -1,5 +1,5 @@
 seed: 42
-precision: bf16
+precision: fp32
 micro_batch_size: 1
 gradient_accumulation_steps: 16
 num_workers: 2
@@ -17,7 +17,7 @@ log_every: 10
 gradient_clip_norm: 1.0
 ema_decay: 0.9999
 ema_warmup: true
-output_dir: artifacts/runs/v2-mdd-1x5090-lora-12hz
+output_dir: artifacts/runs/v2-mdd-1x5090-lora-12hz-fp32
 expected_device: 1x_rtx5090_32gb
 distributed_strategy: ddp
-training_stage: s3_lora_static_map_12hz
+training_stage: s3_lora_static_map_12hz_fp32

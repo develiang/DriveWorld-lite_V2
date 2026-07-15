@@ -20,3 +20,10 @@ def test_turn_sign_and_stop():
     assert np.linalg.norm(stop[-1, 3:5]) == 0
     assert np.isfinite(left).all()
 
+
+def test_hold_and_zero_are_stationary_anchor_relative_trajectories():
+    hold = edit_trajectory(_trajectory(), "hold")
+    zero = edit_trajectory(_trajectory(), "zero")
+    assert hold.shape == (16, 9)
+    assert np.array_equal(hold, np.zeros_like(hold))
+    assert np.array_equal(zero, hold)

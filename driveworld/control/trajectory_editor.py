@@ -52,9 +52,12 @@ def edit_trajectory(
         yaw = ego[:, 2]
         speed = initial_speed * (1 - profile)
         speed[-1] = 0.0
+    elif mode in {"hold", "zero"}:
+        # Ego poses are expressed relative to the anchor.  An all-zero future is
+        # therefore a stationary camera, not a teleport to a global origin.
+        return np.zeros_like(ego, dtype=np.float32)
     elif mode == "original":
         return ego.astype(np.float32, copy=True)
     else:
         raise ValueError(f"Unknown trajectory mode: {mode}")
     return _reconstruct(speed, yaw, steering, dt)
-

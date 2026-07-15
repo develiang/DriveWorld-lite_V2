@@ -247,6 +247,30 @@ def main() -> None:
     train_config = load_yaml(args.train_config)
     if args.max_steps is not None:
         train_config["max_steps"] = args.max_steps
+    precision = str(train_config.get("precision", "fp32")).lower()
+    if precision not in {"fp32", "bf16", "fp16"}:
+        raise ValueError(f"Unsupported training precision: {precision}")
+    if model_config.get("architecture") == "magicdrive_single_view_stdit":
+        dtype_aliases = {
+            "float32": "fp32",
+            "fp32": "fp32",
+            "bfloat16": "bf16",
+            "bf16": "bf16",
+            "float16": "fp16",
+            "fp16": "fp16",
+        }
+        model_dtype = str(model_config.get("dtype", "fp32")).lower()
+        if dtype_aliases.get(model_dtype) != precision:
+            raise ValueError(
+                "V2-MDDiT model.dtype and train.precision must match: "
+                f"model={model_dtype} train={precision}"
+            )
+    if device.type == "cuda" and precision == "fp32":
+        # Keep the all-FP32 run strict: Ampere-or-newer CUDA devices otherwise
+        # may execute float32 matmuls/convolutions with reduced TF32 mantissas.
+        torch.set_float32_matmul_precision("highest")
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
     seed_everything(int(train_config["seed"]) + rank)
     output_dir = Path(train_config["output_dir"])
     resolved = {
@@ -413,7 +437,6 @@ def main() -> None:
         return 0.5 * (1 + math.cos(math.pi * min(max(progress, 0), 1)))
 
     lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-    precision = train_config.get("precision", "fp32")
     use_amp = device.type == "cuda" and precision in {"bf16", "fp16"}
     amp_dtype = torch.bfloat16 if precision == "bf16" else torch.float16
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and precision == "fp16")
@@ -463,9 +486,21 @@ def main() -> None:
         except ImportError:
             pass
         parameter_count = sum(p.numel() for p in raw_model.parameters() if p.requires_grad)
+        model_dtype = next(
+            (parameter.dtype for parameter in raw_model.parameters() if parameter.is_floating_point()),
+            None,
+        )
+        ema_dtypes = sorted(
+            {str(value.dtype).removeprefix("torch.") for value in ema.shadow.values() if value.is_floating_point()}
+        )
+        tf32_enabled = device.type == "cuda" and (
+            torch.backends.cuda.matmul.allow_tf32 or torch.backends.cudnn.allow_tf32
+        )
         print(
             f"device={device} world_size={world_size} trainable_parameters={parameter_count:,} "
-            f"train_clips={len(train_dataset)} cached_latents={bool(args.latent_cache)}",
+            f"train_clips={len(train_dataset)} cached_latents={bool(args.latent_cache)} "
+            f"precision={precision} model_dtype={model_dtype} ema_dtype={','.join(ema_dtypes)} "
+            f"tf32={str(tf32_enabled).lower()}",
             flush=True,
         )
 

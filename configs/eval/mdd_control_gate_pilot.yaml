@@ -1,0 +1,7 @@
+# Pilot-only thresholds. Calibrate these on fixed validation clips before using
+# them as release criteria; they are diagnostics, not publication metrics.
+min_counterfactual_video_mae: 0.005
+max_stop_late_vs_straight: 0.85
+max_hold_late_vs_straight: 0.50
+max_stop_late_to_early: 1.00
+min_left_right_horizontal_separation: 0.05

@@ -5,9 +5,9 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from driveworld.models.factory import build_diffusion
-from driveworld.models.pretrained import audit_pretrained_state
-from driveworld.training.ema import EMA
+from driveworld.models.factory import build_diffusion  # noqa: E402
+from driveworld.models.pretrained import audit_pretrained_state  # noqa: E402
+from driveworld.training.ema import EMA  # noqa: E402
 
 
 def test_factory_builds_single_image_stdit_rectified_flow():
@@ -61,3 +61,32 @@ def test_ema_warmup_and_old_checkpoint_compatibility():
     restored.load_state_dict(old_state)
     assert not restored.warmup and restored.num_updates == 0
 
+
+def test_ema_accumulates_reduced_precision_model_in_fp32():
+    model = torch.nn.Linear(2, 2).to(dtype=torch.bfloat16)
+    with torch.no_grad():
+        model.weight.fill_(1.0)
+        model.bias.zero_()
+    ema = EMA(model, decay=0.5)
+    initial = ema.shadow["weight"].clone()
+
+    with torch.no_grad():
+        model.weight.add_(torch.tensor(0.0078125, dtype=torch.bfloat16))
+    ema.update(model)
+
+    assert ema.shadow["weight"].dtype == torch.float32
+    expected = initial.lerp(model.weight.detach().float(), 0.5)
+    assert torch.equal(ema.shadow["weight"], expected)
+
+    legacy_state = ema.state_dict()
+    legacy_state["shadow"] = {
+        name: value.to(dtype=torch.bfloat16) if value.is_floating_point() else value
+        for name, value in legacy_state["shadow"].items()
+    }
+    restored = EMA(model)
+    restored.load_state_dict(legacy_state)
+    assert all(
+        value.dtype == torch.float32
+        for value in restored.shadow.values()
+        if value.is_floating_point()
+    )

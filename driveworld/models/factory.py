@@ -93,7 +93,7 @@ def _build_magicdrive_single_view(config: dict, *, device, load_vae: bool):
     if not vae_config.get("pretrained"):
         raise ValueError("vae.pretrained is required for V2-MDDiT")
 
-    dtype = config.get("dtype", "bf16")
+    dtype = config.get("dtype", "fp32")
     control_mode = str(config.get("control_mode", "base_only"))
     if control_mode not in {"base_only", "zero_map", "static_map"}:
         raise ValueError(f"Unknown V2-MDDiT control_mode: {control_mode}")
