@@ -88,6 +88,33 @@ def distributed_setup(torch):
     return rank, local_rank, world_size, device
 
 
+def synchronize_trainable_parameters(torch, model, src: int = 0) -> int:
+    """Broadcast only learned deltas before constructing DDP.
+
+    DDP's default initialization broadcasts every parameter, including the
+    multi-gigabyte frozen MDD backbone and VAE. Those tensors are loaded from
+    the same pinned checkpoints on every rank, so only newly initialized
+    trainable tensors need synchronization.
+    """
+    groups = {}
+    for parameter in model.parameters():
+        if parameter.requires_grad:
+            groups.setdefault((parameter.device, parameter.dtype), []).append(parameter)
+
+    synchronized_numel = 0
+    for parameters in groups.values():
+        flat = torch.cat([parameter.detach().reshape(-1) for parameter in parameters])
+        torch.distributed.broadcast(flat, src=src)
+        offset = 0
+        with torch.no_grad():
+            for parameter in parameters:
+                next_offset = offset + parameter.numel()
+                parameter.copy_(flat[offset:next_offset].view_as(parameter))
+                offset = next_offset
+        synchronized_numel += flat.numel()
+    return synchronized_numel
+
+
 def infinite_loader(loader, sampler=None):
     epoch = 0
     while True:
@@ -381,6 +408,15 @@ def main() -> None:
                 flush=True,
             )
 
+    ddp_initial_sync_numel = 0
+    if world_size > 1 and not args.resume:
+        ddp_initial_sync_numel = synchronize_trainable_parameters(torch, raw_model)
+        if is_main:
+            print(
+                f"ddp_initial_sync=trainable_only tensors_numel={ddp_initial_sync_numel:,}",
+                flush=True,
+            )
+
     if args.dry_run:
         if is_main:
             parameter_count = sum(
@@ -475,7 +511,16 @@ def main() -> None:
 
     model = raw_model
     if world_size > 1:
-        model = DistributedDataParallel(raw_model, device_ids=[local_rank], broadcast_buffers=False)
+        # Trainable deltas were explicitly synchronized above for a fresh run;
+        # resumed runs load the same pinned checkpoint on every rank. Avoid
+        # DDP's default all-parameter broadcast of the frozen FP32 backbone.
+        model = DistributedDataParallel(
+            raw_model,
+            device_ids=[local_rank],
+            broadcast_buffers=False,
+            init_sync=False,
+            gradient_as_bucket_view=True,
+        )
 
     writer = None
     if is_main:

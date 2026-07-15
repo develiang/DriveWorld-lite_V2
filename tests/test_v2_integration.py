@@ -8,6 +8,7 @@ torch = pytest.importorskip("torch")
 from driveworld.models.factory import build_diffusion  # noqa: E402
 from driveworld.models.pretrained import audit_pretrained_state  # noqa: E402
 from driveworld.training.ema import EMA  # noqa: E402
+from train import synchronize_trainable_parameters  # noqa: E402
 
 
 def test_factory_builds_single_image_stdit_rectified_flow():
@@ -89,4 +90,27 @@ def test_ema_accumulates_reduced_precision_model_in_fp32():
         value.dtype == torch.float32
         for value in restored.shadow.values()
         if value.is_floating_point()
+    )
+
+
+def test_distributed_initial_sync_broadcasts_only_trainable_parameters(monkeypatch):
+    model = torch.nn.Sequential(torch.nn.Linear(2, 2), torch.nn.Linear(2, 1))
+    model[1].requires_grad_(False)
+    frozen_before = {
+        name: value.detach().clone()
+        for name, value in model[1].named_parameters()
+    }
+
+    def fake_broadcast(value, src):
+        assert src == 0
+        value.fill_(3.0)
+
+    monkeypatch.setattr(torch.distributed, "broadcast", fake_broadcast)
+    synchronized = synchronize_trainable_parameters(torch, model)
+
+    assert synchronized == sum(parameter.numel() for parameter in model[0].parameters())
+    assert all(torch.equal(parameter, torch.full_like(parameter, 3.0)) for parameter in model[0].parameters())
+    assert all(
+        torch.equal(parameter, frozen_before[name])
+        for name, parameter in model[1].named_parameters()
     )
