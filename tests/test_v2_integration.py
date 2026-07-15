@@ -8,7 +8,7 @@ torch = pytest.importorskip("torch")
 from driveworld.models.factory import build_diffusion  # noqa: E402
 from driveworld.models.pretrained import audit_pretrained_state  # noqa: E402
 from driveworld.training.ema import EMA  # noqa: E402
-from train import synchronize_trainable_parameters  # noqa: E402
+from train import distributed_setup, synchronize_trainable_parameters  # noqa: E402
 
 
 def test_factory_builds_single_image_stdit_rectified_flow():
@@ -114,3 +114,24 @@ def test_distributed_initial_sync_broadcasts_only_trainable_parameters(monkeypat
         torch.equal(parameter, frozen_before[name])
         for name, parameter in model[1].named_parameters()
     )
+
+
+def test_distributed_setup_binds_local_device_before_nccl_init(monkeypatch):
+    calls = []
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("RANK", "2")
+    monkeypatch.setenv("LOCAL_RANK", "2")
+    monkeypatch.setattr(torch.cuda, "set_device", lambda device: calls.append(("device", device)))
+    monkeypatch.setattr(
+        torch.distributed,
+        "init_process_group",
+        lambda **kwargs: calls.append(("process_group", kwargs)),
+    )
+
+    rank, local_rank, world_size, device = distributed_setup(torch)
+
+    assert (rank, local_rank, world_size, device) == (2, 2, 4, torch.device("cuda", 2))
+    assert calls == [
+        ("device", torch.device("cuda", 2)),
+        ("process_group", {"backend": "nccl", "device_id": torch.device("cuda", 2)}),
+    ]

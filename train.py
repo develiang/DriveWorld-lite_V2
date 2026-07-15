@@ -80,9 +80,11 @@ def distributed_setup(torch):
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     if world_size > 1:
-        torch.distributed.init_process_group(backend="nccl")
-        torch.cuda.set_device(local_rank)
         device = torch.device("cuda", local_rank)
+        # Bind this process to its exclusive GPU before NCCL creates a
+        # communicator or watchdog CUDA context.
+        torch.cuda.set_device(device)
+        torch.distributed.init_process_group(backend="nccl", device_id=device)
     else:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return rank, local_rank, world_size, device
@@ -111,6 +113,10 @@ def synchronize_trainable_parameters(torch, model, src: int = 0) -> int:
                 next_offset = offset + parameter.numel()
                 parameter.copy_(flat[offset:next_offset].view_as(parameter))
                 offset = next_offset
+        if flat.is_cuda:
+            # NCCL uses a separate CUDA stream. Ensure both the broadcast and
+            # copies have finished before the temporary flat buffer is freed.
+            torch.cuda.synchronize(flat.device)
         synchronized_numel += flat.numel()
     return synchronized_numel
 
@@ -519,7 +525,6 @@ def main() -> None:
             device_ids=[local_rank],
             broadcast_buffers=False,
             init_sync=False,
-            gradient_as_bucket_view=True,
         )
 
     writer = None
