@@ -41,6 +41,7 @@ vae:
   subfolder: null
   local_files_only: true
   posterior: sample
+  temporal_encoding_protocol: diffusers_internal_cache_v1
   micro_frame_size: 8
   micro_batch_size: 1
   rgb_frames: 17

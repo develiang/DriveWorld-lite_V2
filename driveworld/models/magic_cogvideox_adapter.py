@@ -8,8 +8,17 @@ except ImportError:
 from .video_vae import CogVideoXVAEAdapter
 
 
+TEMPORAL_ENCODING_PROTOCOL = "diffusers_internal_cache_v1"
+
+
 class MagicCogVideoXVAEAdapter(CogVideoXVAEAdapter):
-    """CogVideoX VAE wrapper matching MagicDrive's 8-frame micro-chunk protocol."""
+    """CogVideoX VAE wrapper with cache-preserving temporal micro-chunking.
+
+    Diffusers already splits a video into eight-frame encoder chunks internally
+    and carries its causal-convolution cache between those chunks.  The wrapper
+    must therefore pass each complete temporal sample to one ``vae.encode``
+    call.  Only the batch dimension is micro-batched here.
+    """
 
     def __init__(
         self,
@@ -50,30 +59,21 @@ class MagicCogVideoXVAEAdapter(CogVideoXVAEAdapter):
 
     def _encode_micro_batch(self, video, generator=None):
         frames = video.shape[1]
-        if frames == 1 or frames <= self.micro_frame_size + 1:
-            latent = self._encode_value(video.transpose(1, 2), generator=generator)
-            self._clear_encode_cache()
-            return latent.transpose(1, 2).contiguous()
-
-        if frames % self.micro_frame_size == 0:
-            first = None
-            rest = video
-        elif (frames - 1) % self.micro_frame_size == 0:
-            first = video[:, :1]
-            rest = video[:, 1:]
-        else:
+        valid_chunk_layout = (
+            frames <= self.micro_frame_size + 1
+            or frames % self.micro_frame_size == 0
+            or (frames - 1) % self.micro_frame_size == 0
+        )
+        if not valid_chunk_layout:
             raise ValueError(
                 f"MagicDrive VAE expects T=8n or 8n+1, got {frames} frames"
             )
-
-        chunks = []
-        for start in range(0, rest.shape[1], self.micro_frame_size):
-            chunk = rest[:, start : start + self.micro_frame_size]
-            if start == 0 and first is not None:
-                chunk = torch.cat([first, chunk], dim=1)
-            chunks.append(self._encode_value(chunk.transpose(1, 2), generator=generator))
+        # Do not call vae.encode once per temporal chunk.  Public Diffusers
+        # encode calls reset conv_cache; one full-video call lets its internal
+        # 8-frame loop preserve temporal context across the RGB 8/9 boundary.
+        latent = self._encode_value(video.transpose(1, 2), generator=generator)
         self._clear_encode_cache()
-        return torch.cat(chunks, dim=2).transpose(1, 2).contiguous()
+        return latent.transpose(1, 2).contiguous()
 
     def encode(self, video, generator=None):
         if video.ndim != 5:

@@ -13,7 +13,10 @@ from driveworld.diffusion import (
 )
 
 from .latent_unet import LatentVideoUNet
-from .magic_cogvideox_adapter import MagicCogVideoXVAEAdapter
+from .magic_cogvideox_adapter import (
+    TEMPORAL_ENCODING_PROTOCOL,
+    MagicCogVideoXVAEAdapter,
+)
 from .mdd_checkpoint import load_mdd_condition_adapter, load_mdd_singleview_base
 from .mdd_world_model import MDDI2VWorldModel
 from .single_view_stdit import SingleViewSTDiT
@@ -92,6 +95,11 @@ def _build_magicdrive_single_view(config: dict, *, device, load_vae: bool):
         raise ValueError("V2-MDDiT requires vae.kind=magic_cogvideox")
     if not vae_config.get("pretrained"):
         raise ValueError("vae.pretrained is required for V2-MDDiT")
+    if vae_config.get("temporal_encoding_protocol") != TEMPORAL_ENCODING_PROTOCOL:
+        raise ValueError(
+            "V2-MDDiT requires vae.temporal_encoding_protocol="
+            f"{TEMPORAL_ENCODING_PROTOCOL}"
+        )
 
     dtype = config.get("dtype", "fp32")
     control_mode = str(config.get("control_mode", "base_only"))

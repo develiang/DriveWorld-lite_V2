@@ -11,6 +11,7 @@ from PIL import Image, ImageDraw
 
 from driveworld.config import load_yaml
 from driveworld.data import NuScenesFrontDataset
+from driveworld.models.magic_cogvideox_adapter import MagicCogVideoXVAEAdapter
 from driveworld.models.video_vae import CogVideoXVAEAdapter
 from driveworld.utils import write_json
 
@@ -28,6 +29,7 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--index", type=int, default=0)
     parser.add_argument("--frames", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--output", type=Path, default=Path("artifacts/vae_reconstruction.png"))
     args = parser.parse_args()
 
@@ -49,18 +51,39 @@ def main() -> None:
         raise ValueError(f"--frames must be within [1,{len(full_clip)}]")
     original = full_clip[: args.frames][None]
     vae_config = model_config["vae"]
-    vae = CogVideoXVAEAdapter(
-        vae_config["pretrained"],
-        vae_config.get("subfolder"),
-        local_files_only=bool(vae_config.get("local_files_only", True)),
-    )
+    if vae_config.get("kind") == "magic_cogvideox":
+        vae = MagicCogVideoXVAEAdapter(
+            vae_config["pretrained"],
+            vae_config.get("subfolder"),
+            local_files_only=bool(vae_config.get("local_files_only", True)),
+            micro_frame_size=int(vae_config.get("micro_frame_size", 8)),
+            micro_batch_size=int(vae_config.get("micro_batch_size", 1)),
+            posterior=str(vae_config.get("posterior", "sample")),
+        )
+        adapter = "magic_cogvideox_continuous_encode"
+    else:
+        vae = CogVideoXVAEAdapter(
+            vae_config["pretrained"],
+            vae_config.get("subfolder"),
+            local_files_only=bool(vae_config.get("local_files_only", True)),
+        )
+        adapter = "cogvideox"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     vae.to(device)
     original = original.to(device)
-    latent = vae.encode(original)
+    generator = torch.Generator(device=device).manual_seed(args.seed)
+    if isinstance(vae, MagicCogVideoXVAEAdapter):
+        latent = vae.encode(original, generator=generator)
+    else:
+        latent = vae.encode(original)
     reconstruction = vae.decode(latent, output_frames=args.frames)
     mse = (original - reconstruction).square().mean().item()
     psnr = float(10 * np.log10(4.0 / mse)) if mse else float("inf")
+    per_frame_mse = (original - reconstruction).square().mean(dim=(0, 2, 3, 4))
+    per_frame_psnr = [
+        float(10 * np.log10(4.0 / value)) if value else float("inf")
+        for value in per_frame_mse.detach().float().cpu().tolist()
+    ]
 
     panels = []
     for frame in range(args.frames):
@@ -86,8 +109,11 @@ def main() -> None:
         "reconstruction_shape": list(reconstruction.shape),
         "mse": mse,
         "psnr": psnr,
+        "per_frame_psnr": per_frame_psnr,
         "output": str(args.output),
         "device": str(device),
+        "adapter": adapter,
+        "seed": args.seed,
     }
     write_json(args.output.with_suffix(".json"), report)
     print(json.dumps(report, indent=2))

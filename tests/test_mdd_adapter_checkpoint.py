@@ -182,6 +182,7 @@ def _stage_config(fps, rank=2):
                 "kind": "magic_cogvideox",
                 "pretrained": "pretrained/vae",
                 "posterior": "sample",
+                "temporal_encoding_protocol": "diffusers_internal_cache_v1",
                 "rgb_frames": 17,
                 "latent_frames": 5,
                 "latent_mask": [False, True, True, True, True],
@@ -246,6 +247,43 @@ def test_lora_stage_init_allows_fps_and_training_schedule_change(tmp_path):
         torch.equal(source.state_dict()[name], target.state_dict()[name])
         for name in source.checkpoint_include_names
     )
+
+
+def test_lora_stage_init_rejects_legacy_temporal_encoding_protocol(tmp_path):
+    lora = {
+        "rank": 2,
+        "alpha": 4,
+        "temporal": True,
+        "cross_attention": True,
+        "train_adaln": True,
+    }
+    model = _world_model().freeze_for_lora_training(lora)
+    optimizer = torch.optim.AdamW(
+        [parameter for parameter in model.parameters() if parameter.requires_grad],
+        lr=1e-4,
+    )
+    legacy_config = _stage_config(12)
+    legacy_config["model"]["vae"].pop("temporal_encoding_protocol")
+    path = tmp_path / "legacy-temporal-encode.pt"
+    save_checkpoint(
+        path,
+        model,
+        optimizer,
+        scheduler=None,
+        ema=None,
+        step=3000,
+        config=legacy_config,
+        include_names=model.checkpoint_include_names,
+    )
+
+    with pytest.raises(RuntimeError, match="temporal_encoding_protocol"):
+        load_checkpoint(
+            path,
+            model,
+            restore_rng=False,
+            expected_config=_stage_config(12),
+            compatibility_keys=MDD_INIT_COMPATIBILITY_KEYS,
+        )
 
 
 def test_lora_stage_init_rejects_rank_change(tmp_path):

@@ -65,8 +65,20 @@ def test_magic_vae_joint_17_frame_protocol(monkeypatch):
     latent, mask = adapter.encode_i2v_training_clip(anchor, future)
     assert latent.shape == (2, 5, 16, 4, 4)
     assert mask.tolist() == [[False, True, True, True, True]] * 2
-    assert adapter.vae.encode_lengths == [9, 8, 9, 8]
+    # Batch micro-chunking is retained, but each sample must make exactly one
+    # 17-frame encode call so the real VAE can preserve temporal conv_cache.
+    assert adapter.vae.encode_lengths == [17, 17]
     assert adapter.vae.clear_calls == 2
+
+
+def test_magic_vae_does_not_split_temporal_context_across_public_encode_calls(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    video = torch.zeros(1, 17, 3, 2, 2)
+
+    latent = adapter.encode(video)
+
+    assert latent.shape[1] == 5
+    assert adapter.vae.encode_lengths == [17]
 
 
 def test_magic_vae_defaults_to_stage3_posterior_sample(monkeypatch):
