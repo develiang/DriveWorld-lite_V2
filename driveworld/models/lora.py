@@ -59,15 +59,23 @@ def inject_mdd_lora(
     dropout: float = 0.0,
     temporal: bool = True,
     cross_attention: bool = True,
+    spatial_attention: bool = False,
 ):
-    """Inject LoRA only into source-backed temporal and cross-attention linears."""
+    """Inject LoRA into selected temporal, cross-, and spatial-attention linears."""
     selected = []
     for name, module in list(denoiser.named_modules()):
         if not isinstance(module, nn.Linear) or isinstance(module, LoRALinear):
             continue
         is_temporal = name.startswith(("base_blocks_t.", "control_blocks_t."))
         is_cross_attention = ".cross_attn." in name
-        if not ((temporal and is_temporal) or (cross_attention and is_cross_attention)):
+        is_spatial_attention = name.startswith(
+            ("base_blocks_s.", "control_blocks_s.")
+        ) and ".attn." in name
+        if not (
+            (temporal and is_temporal)
+            or (cross_attention and is_cross_attention)
+            or (spatial_attention and is_spatial_attention)
+        ):
             continue
         parent_name, child_name = name.rsplit(".", 1)
         parent = denoiser.get_submodule(parent_name)

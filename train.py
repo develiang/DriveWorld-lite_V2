@@ -32,15 +32,24 @@ MDD_RESUME_COMPATIBILITY_KEYS = (
     "model.vae.pretrained",
     "model.vae.posterior",
     "model.vae.temporal_encoding_protocol",
+    "model.vae.history_rgb_frames",
+    "model.vae.future_rgb_frames",
     "model.vae.rgb_frames",
+    "model.vae.history_latent_frames",
     "model.vae.latent_frames",
     "model.vae.latent_mask",
+    "model.temporal_consistency.velocity_weight",
+    "model.temporal_consistency.acceleration_weight",
+    "model.temporal_consistency.motion_region_weight",
     "model.finetune.mode",
     "model.finetune.rank",
     "model.finetune.alpha",
     "model.finetune.temporal",
     "model.finetune.cross_attention",
+    "model.finetune.spatial_attention",
     "model.finetune.train_adaln",
+    "data.history_frames",
+    "data.future_frames",
     "data.static_map",
     "train.training_stage",
 )
@@ -61,14 +70,21 @@ MDD_INIT_COMPATIBILITY_KEYS = (
     "model.vae.pretrained",
     "model.vae.posterior",
     "model.vae.temporal_encoding_protocol",
+    "model.vae.history_rgb_frames",
+    "model.vae.future_rgb_frames",
     "model.vae.rgb_frames",
+    "model.vae.history_latent_frames",
     "model.vae.latent_frames",
     "model.vae.latent_mask",
+    "model.temporal_consistency.velocity_weight",
+    "model.temporal_consistency.acceleration_weight",
+    "model.temporal_consistency.motion_region_weight",
     "model.finetune.mode",
     "model.finetune.rank",
     "model.finetune.alpha",
     "model.finetune.temporal",
     "model.finetune.cross_attention",
+    "model.finetune.spatial_attention",
     "model.finetune.train_adaln",
     "data.static_map.enabled",
     "data.static_map.xbound",
@@ -669,8 +685,20 @@ def main() -> None:
                 )
                 current_loss = float(losses["loss"].detach())
                 lr = optimizer.param_groups[0]["lr"]
+                temporal_log = ""
+                if "flow_loss" in losses:
+                    temporal_log += f" flow={float(losses['flow_loss']):.6f}"
+                if "temporal_velocity_loss" in losses:
+                    temporal_log += (
+                        f" temporal_v={float(losses['temporal_velocity_loss']):.6f}"
+                    )
+                if "temporal_acceleration_loss" in losses:
+                    temporal_log += (
+                        f" temporal_a={float(losses['temporal_acceleration_loss']):.6f}"
+                    )
                 print(
-                    f"step={global_step} loss={current_loss:.6f} grad={float(grad_norm):.4f} "
+                    f"step={global_step} loss={current_loss:.6f}{temporal_log} "
+                    f"grad={float(grad_norm):.4f} "
                     f"lr={lr:.3e} peak_vram_gb={peak_gb:.2f} "
                     f"steps_per_s={(global_step - last_log_step) / max(elapsed, 1e-6):.3f}",
                     flush=True,
@@ -680,6 +708,17 @@ def main() -> None:
                     writer.add_scalar("train/grad_norm", float(grad_norm), global_step)
                     writer.add_scalar("train/lr", lr, global_step)
                     writer.add_scalar("system/peak_vram_gb", peak_gb, global_step)
+                    for loss_name in (
+                        "flow_loss",
+                        "temporal_velocity_loss",
+                        "temporal_acceleration_loss",
+                    ):
+                        if loss_name in losses:
+                            writer.add_scalar(
+                                f"train/{loss_name}",
+                                float(losses[loss_name]),
+                                global_step,
+                            )
                     if "timesteps" in losses:
                         writer.add_scalar(
                             "train/timestep_mean", float(losses["timesteps"].float().mean()), global_step

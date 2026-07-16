@@ -18,6 +18,9 @@ case "${MODE}" in
   12hz)
     configs=(configs/data/nuscenes_front_1x16_12hz_trainval.yaml)
     ;;
+  12hz_temporal)
+    configs=(configs/data/nuscenes_front_8x16_12hz_trainval.yaml)
+    ;;
   6hz)
     configs=(configs/data/nuscenes_front_8x16_6hz_trainval.yaml)
     ;;
@@ -28,7 +31,7 @@ case "${MODE}" in
     )
     ;;
   *)
-    echo "MODE must be 12hz, 6hz, or both" >&2
+    echo "MODE must be 12hz, 12hz_temporal, 6hz, or both" >&2
     exit 2
     ;;
 esac
@@ -56,6 +59,7 @@ for config in "${configs[@]}"
 do
   case "${config}" in
     *1x16_12hz*) manifest_dir=artifacts/manifests/nuscenes-trainval-front-1x16-12hz ;;
+    *8x16_12hz*) manifest_dir=artifacts/manifests/nuscenes-trainval-front-8x16-12hz ;;
     *8x16_6hz*) manifest_dir=artifacts/manifests/nuscenes-trainval-front-8x16-6hz ;;
   esac
   manifests+=("${manifest_dir}/train.jsonl" "${manifest_dir}/val.jsonl")

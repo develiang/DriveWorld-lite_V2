@@ -33,6 +33,18 @@ def test_magic_timestep_transform_maps_17_rgb_frames_to_5_latents():
     assert torch.allclose(transformed, torch.tensor([expected]))
 
 
+def test_magic_timestep_transform_maps_24_rgb_frames_to_6_latents():
+    transformed = magic_timestep_transform(
+        torch.tensor([500.0]),
+        height=torch.tensor([512.0]),
+        width=torch.tensor([512.0]),
+        num_frames=torch.tensor([24.0]),
+    )
+    ratio = 6**0.5
+    expected = ratio * 0.5 / (1 + (ratio - 1) * 0.5) * 1000
+    assert torch.allclose(transformed, torch.tensor([expected]))
+
+
 def test_magic_rf_image_head_mask_keeps_anchor_clean_and_excludes_its_loss():
     scheduler = MagicRectifiedFlowScheduler(use_timestep_transform=False)
     clean = torch.randn(1, 2, 5, 3, 3)

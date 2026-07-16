@@ -34,6 +34,11 @@ def test_cog_temporal_downsample_maps_17_to_5_and_keeps_first():
     assert twice[0, 0, 0, 0] == 0
 
 
+def test_cog_temporal_downsample_maps_24_to_6():
+    value = torch.arange(24, dtype=torch.float32).reshape(1, 24, 1, 1)
+    assert cog_temporal_downsample(cog_temporal_downsample(value)).shape[1] == 6
+
+
 def test_condition_adapter_stage3_shapes_and_zero_kinematics_residual():
     torch.manual_seed(5)
     adapter = MDDConditionAdapter(
@@ -56,6 +61,20 @@ def test_null_bbox_token_has_exact_stage3_temporal_contract():
     output = embedder(2)
     assert output.shape == (2, 5, 1, 32)
     assert torch.isfinite(output).all()
+
+
+def test_condition_adapter_supports_24_rgb_frames():
+    adapter = MDDConditionAdapter(
+        hidden_size=32, frame_num_heads=4, kinematics_hidden_size=16
+    ).eval()
+    ego = torch.randn(1, 24, 9)
+    output = adapter(
+        ego,
+        torch.ones_like(ego, dtype=torch.bool),
+        base_token=torch.randn(32),
+    )
+    assert output.shape == (1, 6, 4, 32)
+    assert adapter.bbox_embedder(1, frames=24).shape == (1, 6, 1, 32)
 
 
 def test_condition_adapter_parameter_names_match_stage3():

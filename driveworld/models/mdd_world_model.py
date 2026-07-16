@@ -3,9 +3,11 @@ from __future__ import annotations
 try:
     import torch
     from torch import nn
+    from torch.nn import functional as F
 except ImportError:
     torch = None
     nn = object
+    F = None
 
 from .lora import inject_mdd_lora
 
@@ -32,7 +34,7 @@ class _StateSubset:
 
 
 class MDDI2VWorldModel(nn.Module if torch is not None else object):
-    """Single-image 17-RGB/5-latent world-model training contract for V2-MDDiT."""
+    """History-conditioned I2V world-model training contract for V2-MDDiT."""
 
     input_contract = "mdd_i2v_v1"
 
@@ -44,6 +46,11 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
         scheduler,
         fps: float = 6.0,
         condition_dropout: float = 0.15,
+        history_frames: int = 1,
+        future_frames: int = 16,
+        temporal_velocity_weight: float = 0.0,
+        temporal_acceleration_weight: float = 0.0,
+        motion_region_weight: float = 0.0,
     ):
         if torch is None:
             raise RuntimeError("PyTorch is required")
@@ -53,6 +60,30 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
         self.condition_adapter = condition_adapter
         self.scheduler = scheduler
         self.fps = float(fps)
+        self.history_frames = int(history_frames)
+        self.future_frames = int(future_frames)
+        if self.history_frames < 1:
+            raise ValueError("history_frames must be positive")
+        if self.future_frames != 16:
+            raise ValueError("The current MDD head requires exactly 16 future RGB frames")
+        self.history_latent_frames = self.vae.latent_frame_count(self.history_frames)
+        self.total_rgb_frames = self.history_frames + self.future_frames
+        self.total_latent_frames = self.vae.latent_frame_count(self.total_rgb_frames)
+        self.future_latent_frames = self.total_latent_frames - self.history_latent_frames
+        if self.future_latent_frames != 4:
+            raise ValueError(
+                "The current MDD head requires exactly 4 future latent frames; "
+                f"got {self.future_latent_frames} for {self.history_frames}+{self.future_frames} RGB frames"
+            )
+        self.temporal_velocity_weight = float(temporal_velocity_weight)
+        self.temporal_acceleration_weight = float(temporal_acceleration_weight)
+        self.motion_region_weight = float(motion_region_weight)
+        if min(
+            self.temporal_velocity_weight,
+            self.temporal_acceleration_weight,
+            self.motion_region_weight,
+        ) < 0:
+            raise ValueError("Temporal consistency weights must be non-negative")
         if not 0 <= condition_dropout < 1:
             raise ValueError("condition_dropout must be in [0, 1)")
         self.condition_dropout = float(condition_dropout)
@@ -97,6 +128,7 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
             dropout=float(lora_config.get("dropout", 0.0)),
             temporal=bool(lora_config.get("temporal", True)),
             cross_attention=bool(lora_config.get("cross_attention", True)),
+            spatial_attention=bool(lora_config.get("spatial_attention", False)),
         )
         self.condition_adapter.kinematics_embedder.requires_grad_(True)
         if bool(lora_config.get("train_adaln", True)):
@@ -117,17 +149,76 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
         }
         return self
 
-    @staticmethod
-    def _ego_sequence(past_ego_raw, future_ego_raw, past_valid, future_valid):
+    def _ego_sequence(self, past_ego_raw, future_ego_raw, past_valid, future_valid):
         if past_ego_raw.ndim != 3 or past_ego_raw.shape[-1] != 9:
             raise ValueError("past_ego_raw must be [B,history,9]")
-        if future_ego_raw.shape[1:] != (16, 9):
-            raise ValueError("future_ego_raw must be [B,16,9]")
+        if past_ego_raw.shape[1] < self.history_frames:
+            raise ValueError(
+                f"past_ego_raw must contain at least {self.history_frames} history frames"
+            )
+        if future_ego_raw.shape[1:] != (self.future_frames, 9):
+            raise ValueError(
+                f"future_ego_raw must be [B,{self.future_frames},9]"
+            )
         if past_valid.shape != past_ego_raw.shape or future_valid.shape != future_ego_raw.shape:
             raise ValueError("Ego valid masks must match their Ego tensors")
-        ego = torch.cat([past_ego_raw[:, -1:], future_ego_raw], dim=1)
-        valid = torch.cat([past_valid[:, -1:], future_valid], dim=1)
+        ego = torch.cat([past_ego_raw[:, -self.history_frames :], future_ego_raw], dim=1)
+        valid = torch.cat([past_valid[:, -self.history_frames :], future_valid], dim=1)
         return ego, valid
+
+    def _temporal_consistency_losses(
+        self,
+        prediction,
+        noisy,
+        clean,
+        timesteps,
+        x_mask,
+    ):
+        """Supervise latent velocity/acceleration on the model's clean estimate."""
+        coefficient = (timesteps.float() / float(self.scheduler.num_timesteps)).to(
+            device=prediction.device, dtype=prediction.dtype
+        )
+        coefficient = coefficient.view(-1, 1, 1, 1, 1)
+        predicted_clean = noisy + coefficient * prediction
+        predicted_clean = torch.where(
+            x_mask[:, None, :, None, None],
+            predicted_clean,
+            clean,
+        )
+
+        # Include the last known latent so the first predicted motion is tied
+        # to observed history, rather than only regularizing future-to-future motion.
+        start = self.history_latent_frames - 1
+        predicted_sequence = predicted_clean[:, :, start:]
+        clean_sequence = clean[:, :, start:]
+        predicted_velocity = predicted_sequence[:, :, 1:] - predicted_sequence[:, :, :-1]
+        clean_velocity = clean_sequence[:, :, 1:] - clean_sequence[:, :, :-1]
+
+        velocity_error = F.smooth_l1_loss(
+            predicted_velocity.float(), clean_velocity.float(), reduction="none"
+        )
+        if self.motion_region_weight:
+            motion = clean_velocity.float().square().mean(dim=1, keepdim=True).sqrt()
+            normalizer = motion.mean(dim=(-1, -2), keepdim=True).clamp_min(1e-6)
+            normalized_motion = (motion / normalizer).clamp(max=4.0)
+            velocity_error = velocity_error * (
+                1.0 + self.motion_region_weight * normalized_motion
+            )
+        velocity_loss = velocity_error.flatten(1).mean(1)
+
+        if predicted_velocity.shape[2] < 2:
+            acceleration_loss = torch.zeros_like(velocity_loss)
+        else:
+            predicted_acceleration = (
+                predicted_velocity[:, :, 1:] - predicted_velocity[:, :, :-1]
+            )
+            clean_acceleration = clean_velocity[:, :, 1:] - clean_velocity[:, :, :-1]
+            acceleration_loss = F.smooth_l1_loss(
+                predicted_acceleration.float(),
+                clean_acceleration.float(),
+                reduction="none",
+            ).flatten(1).mean(1)
+        return velocity_loss, acceleration_loss
 
     def training_loss(
         self,
@@ -144,13 +235,15 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
         timesteps=None,
         noise=None,
     ):
-        if past_rgb.ndim != 5 or past_rgb.shape[1] < 1:
+        if past_rgb.ndim != 5 or past_rgb.shape[1] < self.history_frames:
             raise ValueError("past_rgb must be [B,history,C,H,W]")
-        if future_rgb.shape[1:] != (16, *past_rgb.shape[2:]):
-            raise ValueError("future_rgb must contain 16 frames matching past RGB shape")
-        anchor = past_rgb[:, -1:]
+        if future_rgb.shape[1:] != (self.future_frames, *past_rgb.shape[2:]):
+            raise ValueError(
+                f"future_rgb must contain {self.future_frames} frames matching past RGB shape"
+            )
+        history = past_rgb[:, -self.history_frames :]
         with torch.no_grad():
-            clean_btchw, x_mask = self.vae.encode_i2v_training_clip(anchor, future_rgb)
+            clean_btchw, x_mask = self.vae.encode_i2v_training_clip(history, future_rgb)
         clean = clean_btchw.permute(0, 2, 1, 3, 4).contiguous()
         ego, ego_valid = self._ego_sequence(
             past_ego_raw,
@@ -191,7 +284,9 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
             "width": torch.full(
                 (clean.shape[0],), past_rgb.shape[-1], device=clean.device
             ),
-            "num_frames": torch.full((clean.shape[0],), 17, device=clean.device),
+            "num_frames": torch.full(
+                (clean.shape[0],), self.total_rgb_frames, device=clean.device
+            ),
         }
         if timesteps is None:
             timesteps = self.scheduler.sample_timesteps(
@@ -211,11 +306,26 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
             width=past_rgb.shape[-1],
             x_mask=x_mask,
             static_maps=static_maps,
+            rgb_frames=self.total_rgb_frames,
         )
         per_sample = self.scheduler.masked_mse(prediction, target, x_mask)
+        velocity_loss, acceleration_loss = self._temporal_consistency_losses(
+            prediction,
+            noisy,
+            clean,
+            timesteps,
+            x_mask,
+        )
+        total_loss = (
+            per_sample
+            + self.temporal_velocity_weight * velocity_loss
+            + self.temporal_acceleration_weight * acceleration_loss
+        )
         return {
-            "loss": per_sample.mean(),
+            "loss": total_loss.mean(),
             "flow_loss": per_sample.mean().detach(),
+            "temporal_velocity_loss": velocity_loss.mean().detach(),
+            "temporal_acceleration_loss": acceleration_loss.mean().detach(),
             "timesteps": timesteps.detach(),
             "latent_shape": tuple(clean.shape),
             "condition_shape": tuple(condition.shape),
@@ -281,30 +391,32 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
         generator=None,
         return_latent: bool = False,
     ):
-        """MagicDrive-compatible 1000->0 Euler CFG with a fixed clean anchor."""
-        if past_rgb.ndim != 5 or past_rgb.shape[1] < 1:
+        """MagicDrive-compatible 1000->0 Euler CFG with fixed history latents."""
+        if past_rgb.ndim != 5 or past_rgb.shape[1] < self.history_frames:
             raise ValueError("past_rgb must be [B,history,C,H,W]")
         batch = past_rgb.shape[0]
         device = past_rgb.device
         if past_ego_raw is None:
-            past_ego_raw = torch.zeros(batch, 1, 9, device=device)
+            past_ego_raw = torch.zeros(batch, self.history_frames, 9, device=device)
         if past_ego_valid is None:
             past_ego_valid = torch.zeros_like(past_ego_raw, dtype=torch.bool)
-        anchor = self.vae.encode_anchor(past_rgb[:, -1:], generator=generator)
-        anchor = anchor.permute(0, 2, 1, 3, 4).contiguous()
+        history = self.vae.encode_history(
+            past_rgb[:, -self.history_frames :], generator=generator
+        )
+        history = history.permute(0, 2, 1, 3, 4).contiguous()
         future_noise = torch.randn(
             batch,
-            anchor.shape[1],
-            4,
-            anchor.shape[3],
-            anchor.shape[4],
-            device=anchor.device,
-            dtype=anchor.dtype,
+            history.shape[1],
+            self.future_latent_frames,
+            history.shape[3],
+            history.shape[4],
+            device=history.device,
+            dtype=history.dtype,
             generator=generator,
         )
-        latent = torch.cat([anchor, future_noise], dim=2)
-        x_mask = torch.ones(batch, 5, device=device, dtype=torch.bool)
-        x_mask[:, 0] = False
+        latent = torch.cat([history, future_noise], dim=2)
+        x_mask = torch.ones(batch, self.total_latent_frames, device=device, dtype=torch.bool)
+        x_mask[:, : self.history_latent_frames] = False
         dtype = self.denoiser.x_embedder.proj.weight.dtype
         condition = self._sampling_condition(
             past_ego_raw,
@@ -332,7 +444,7 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
         metadata = {
             "height": torch.full((batch,), past_rgb.shape[-2], device=device),
             "width": torch.full((batch,), past_rgb.shape[-1], device=device),
-            "num_frames": torch.full((batch,), 17, device=device),
+            "num_frames": torch.full((batch,), self.total_rgb_frames, device=device),
         }
         timesteps = self.scheduler.sampling_timesteps(
             batch, num_steps, device, model_kwargs=metadata
@@ -347,6 +459,7 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
                 width=past_rgb.shape[-1],
                 x_mask=x_mask,
                 static_maps=static_maps,
+                rgb_frames=self.total_rgb_frames,
             )
             if null_condition is not None:
                 null_prediction = self.denoiser(
@@ -358,6 +471,7 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
                     width=past_rgb.shape[-1],
                     x_mask=x_mask,
                     static_maps=(torch.zeros_like(static_maps) if static_maps is not None else None),
+                    rgb_frames=self.total_rgb_frames,
                 )
                 prediction = null_prediction + guidance_scale * (
                     prediction - null_prediction
@@ -371,13 +485,14 @@ class MDDI2VWorldModel(nn.Module if torch is not None else object):
                 dtype=prediction.dtype
             )
             latent = latent + prediction * delta[:, None, None, None, None]
-            latent[:, :, :1] = anchor
+            latent[:, :, : self.history_latent_frames] = history
         if return_latent:
             return latent
         decoded = self.vae.decode(
-            latent.permute(0, 2, 1, 3, 4).contiguous(), output_frames=17
+            latent.permute(0, 2, 1, 3, 4).contiguous(),
+            output_frames=self.total_rgb_frames,
         )
-        return decoded[:, 1:17]
+        return decoded[:, self.history_frames : self.total_rgb_frames]
 
     def forward(self, **kwargs):
         allowed = {

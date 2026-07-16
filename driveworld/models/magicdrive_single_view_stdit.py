@@ -568,12 +568,12 @@ class MagicDriveSingleViewSTDiT(nn.Module if torch is not None else object):
         )
         return value[:, :, : real_shape[0], : real_shape[1], : real_shape[2]]
 
-    def _encode_control_map(self, maps, latent, frames, token_h, token_w):
+    def _encode_control_map(self, maps, latent, frames, token_h, token_w, rgb_frames):
         batch = latent.shape[0]
         if maps is None:
             maps = torch.zeros(
                 batch,
-                17,
+                rgb_frames,
                 self.map_channels,
                 self.zero_map_size,
                 self.zero_map_size,
@@ -581,18 +581,19 @@ class MagicDriveSingleViewSTDiT(nn.Module if torch is not None else object):
                 dtype=latent.dtype,
             )
         elif maps.ndim == 4:
-            maps = maps[:, None].expand(-1, 17, -1, -1, -1)
-        if maps.ndim != 5 or maps.shape[:3] != (batch, 17, self.map_channels):
+            maps = maps[:, None].expand(-1, rgb_frames, -1, -1, -1)
+        if maps.ndim != 5 or maps.shape[:3] != (batch, rgb_frames, self.map_channels):
             raise ValueError(
-                f"static_maps must be [B,8,H,W] or [B,17,8,H,W], got {tuple(maps.shape)}"
+                "static_maps must be [B,C,H,W] or [B,T,C,H,W] with "
+                f"T={rgb_frames}, got {tuple(maps.shape)}"
             )
         maps = maps.to(device=latent.device, dtype=latent.dtype)
         map_height, map_width = maps.shape[-2:]
-        maps = maps.reshape(batch * 17, self.map_channels, map_height, map_width)
+        maps = maps.reshape(batch * rgb_frames, self.map_channels, map_height, map_width)
         maps = self.controlnet_cond_embedder(maps)
-        maps = maps.reshape(batch, 17, maps.shape[1], maps.shape[2], maps.shape[3]).permute(
-            0, 2, 1, 3, 4
-        )
+        maps = maps.reshape(
+            batch, rgb_frames, maps.shape[1], maps.shape[2], maps.shape[3]
+        ).permute(0, 2, 1, 3, 4)
         maps = self.controlnet_cond_embedder_temp(maps)
         target_shape = (frames, token_h * self.patch_size[1], token_w * self.patch_size[2])
         if maps.shape[-3:] != target_shape:
@@ -612,6 +613,7 @@ class MagicDriveSingleViewSTDiT(nn.Module if torch is not None else object):
         width,
         x_mask=None,
         static_maps=None,
+        rgb_frames: int = 17,
     ):
         if latent.ndim != 5:
             raise ValueError("latent must be [B,C,T,H,W]")
@@ -653,7 +655,7 @@ class MagicDriveSingleViewSTDiT(nn.Module if torch is not None else object):
         control = None
         if self.control_depth:
             control_map = self._encode_control_map(
-                static_maps, latent, frames, token_h, token_w
+                static_maps, latent, frames, token_h, token_w, int(rgb_frames)
             )
             control = self.x_control_embedder(latent).reshape(
                 batch, frames, spatial, -1

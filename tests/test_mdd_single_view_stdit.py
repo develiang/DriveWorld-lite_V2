@@ -90,3 +90,16 @@ def test_mdd_single_view_control_branch_has_stage3_names_and_runs_zero_map():
     )
     assert output.shape == latent.shape
     assert torch.isfinite(output).all()
+
+    temporal_output = model(
+        torch.randn(1, 4, 6, 8, 8),
+        torch.tensor([500.0]),
+        torch.randn(1, 6, 3, 32),
+        fps=12.0,
+        height=64,
+        width=64,
+        x_mask=torch.tensor([[False, False, True, True, True, True]]),
+        rgb_frames=24,
+    )
+    assert temporal_output.shape == (1, 4, 6, 8, 8)
+    assert torch.isfinite(temporal_output).all()

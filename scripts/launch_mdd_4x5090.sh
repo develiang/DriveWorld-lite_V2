@@ -13,13 +13,18 @@ case "${MODE}" in
     MODEL_CONFIG="${MODEL_CONFIG:-configs/model/v2_mdd_stage3_singleview_lora_12hz.yaml}"
     TRAIN_CONFIG="${TRAIN_CONFIG:-configs/train/v2_mdd_4x5090_lora_12hz.yaml}"
     ;;
+  12hz_temporal)
+    DATA_CONFIG="${DATA_CONFIG:-configs/data/nuscenes_front_8x16_12hz_trainval.yaml}"
+    MODEL_CONFIG="${MODEL_CONFIG:-configs/model/v2_mdd_stage3_singleview_lora_12hz_temporal.yaml}"
+    TRAIN_CONFIG="${TRAIN_CONFIG:-configs/train/v2_mdd_4x5090_lora_12hz_temporal.yaml}"
+    ;;
   6hz)
     DATA_CONFIG="${DATA_CONFIG:-configs/data/nuscenes_front_8x16_6hz_trainval.yaml}"
     MODEL_CONFIG="${MODEL_CONFIG:-configs/model/v2_mdd_stage3_singleview_lora_6hz.yaml}"
     TRAIN_CONFIG="${TRAIN_CONFIG:-configs/train/v2_mdd_4x5090_lora_6hz.yaml}"
     ;;
   *)
-    echo "MODE must be 12hz or 6hz" >&2
+    echo "MODE must be 12hz, 12hz_temporal, or 6hz" >&2
     exit 2
     ;;
 esac

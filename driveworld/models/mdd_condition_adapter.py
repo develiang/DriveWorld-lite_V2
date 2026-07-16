@@ -199,8 +199,8 @@ class MagicNullBBoxEmbedder(nn.Module if torch is not None else object):
         self.final_proj = nn.Linear(hidden_size, hidden_size)
 
     def forward(self, batch_size: int, frames: int = 17):
-        if frames != 17:
-            raise ValueError("Stage-3 null bbox contract requires 17 RGB frames")
+        if frames < 1:
+            raise ValueError("frames must be positive")
         position = self.bbox_proj(self.null_pos_feature)
         position = F.silu(position)
         token = self.second_linear(
@@ -276,9 +276,9 @@ class MDDConditionAdapter(nn.Module if torch is not None else object):
         camera_valid=None,
     ):
         if ego.ndim != 3 or ego.shape[-1] != 9:
-            raise ValueError("ego must be [B,17,9]")
-        if ego.shape[1] != 17 or ego_valid.shape != ego.shape:
-            raise ValueError("Stage-3 I2V condition requires ego/valid [B,17,9]")
+            raise ValueError("ego must be [B,T,9]")
+        if ego_valid.shape != ego.shape:
+            raise ValueError("Stage-3 I2V condition requires matching ego/valid [B,T,9]")
         batch, frames, _ = ego.shape
         pose_valid = ego_valid[..., :3].all(dim=-1)
         poses = ego_to_next2top(ego)

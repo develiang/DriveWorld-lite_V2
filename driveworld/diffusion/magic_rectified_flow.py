@@ -26,7 +26,7 @@ def magic_timestep_transform(
     scale: float = 1.0,
     cog_style: bool = True,
 ):
-    """MagicDrive Stage-3 resolution/time shift, including CogVideoX 17 -> 5 mapping."""
+    """MagicDrive Stage-3 resolution/time shift with CogVideoX RGB-to-latent mapping."""
     if torch is None:
         raise RuntimeError("PyTorch is required")
     timesteps = timesteps.to(dtype=torch.float32)

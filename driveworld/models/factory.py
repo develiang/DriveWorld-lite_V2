@@ -34,11 +34,13 @@ def build_baseline(config: dict):
     )
 
 
-def _build_magicdrive_single_view(config: dict, *, device, load_vae: bool):
+def _build_magicdrive_single_view(
+    config: dict, *, device, load_vae: bool, data_history_frames: int
+):
     if not load_vae:
         raise ValueError(
             "V2-MDDiT does not accept the legacy split latent cache; "
-            "use online joint 17-frame VAE encoding"
+            "use online joint history+future VAE encoding"
         )
     checkpoint = config.get("pretrained_checkpoint")
     if not checkpoint:
@@ -133,6 +135,30 @@ def _build_magicdrive_single_view(config: dict, *, device, load_vae: bool):
         micro_batch_size=int(vae_config.get("micro_batch_size", 1)),
         posterior=str(vae_config.get("posterior", "sample")),
     ).to(device=device, dtype=denoiser.x_embedder.proj.weight.dtype)
+    model_history_frames = int(vae_config.get("history_rgb_frames", 1))
+    future_frames = int(vae_config.get("future_rgb_frames", 16))
+    if model_history_frames > int(data_history_frames):
+        raise ValueError(
+            f"Model requires {model_history_frames} history frames, but data provides "
+            f"only {data_history_frames}"
+        )
+    expected_rgb_frames = model_history_frames + future_frames
+    configured_rgb_frames = int(vae_config.get("rgb_frames", expected_rgb_frames))
+    if configured_rgb_frames != expected_rgb_frames:
+        raise ValueError(
+            "vae.rgb_frames must equal history_rgb_frames + future_rgb_frames"
+        )
+    expected_history_latents = vae.latent_frame_count(model_history_frames)
+    expected_latents = vae.latent_frame_count(expected_rgb_frames)
+    if int(vae_config.get("history_latent_frames", expected_history_latents)) != expected_history_latents:
+        raise ValueError("vae.history_latent_frames does not match the temporal VAE protocol")
+    if int(vae_config.get("latent_frames", expected_latents)) != expected_latents:
+        raise ValueError("vae.latent_frames does not match the temporal VAE protocol")
+    expected_mask = [False] * expected_history_latents + [True] * (
+        expected_latents - expected_history_latents
+    )
+    if list(vae_config.get("latent_mask", expected_mask)) != expected_mask:
+        raise ValueError(f"vae.latent_mask must be {expected_mask}")
     scheduler_config = config.get("scheduler", {})
     if scheduler_config.get("family", "magic_rectified_flow") != "magic_rectified_flow":
         raise ValueError("V2-MDDiT requires scheduler.family=magic_rectified_flow")
@@ -145,6 +171,7 @@ def _build_magicdrive_single_view(config: dict, *, device, load_vae: bool):
         transform_scale=float(scheduler_config.get("transform_scale", 1.0)),
         cog_style_transform=bool(scheduler_config.get("cog_style_transform", True)),
     )
+    temporal_consistency = dict(config.get("temporal_consistency", {}))
     model = MDDI2VWorldModel(
         vae,
         denoiser,
@@ -152,6 +179,13 @@ def _build_magicdrive_single_view(config: dict, *, device, load_vae: bool):
         scheduler,
         fps=float(config.get("fps", 6.0)),
         condition_dropout=float(config.get("condition_dropout", 0.15)),
+        history_frames=model_history_frames,
+        future_frames=future_frames,
+        temporal_velocity_weight=float(temporal_consistency.get("velocity_weight", 0.0)),
+        temporal_acceleration_weight=float(
+            temporal_consistency.get("acceleration_weight", 0.0)
+        ),
+        motion_region_weight=float(temporal_consistency.get("motion_region_weight", 0.0)),
     )
     finetune = dict(config.get("finetune", {}))
     mode = str(finetune.get("mode", "kinematics_adapter"))
@@ -179,7 +213,12 @@ def build_diffusion(
 ):
     architecture = str(config.get("architecture", "latent_unet"))
     if architecture == "magicdrive_single_view_stdit":
-        return _build_magicdrive_single_view(config, device=device, load_vae=load_vae)
+        return _build_magicdrive_single_view(
+            config,
+            device=device,
+            load_vae=load_vae,
+            data_history_frames=history_frames,
+        )
 
     vae_config = config.get("vae", {})
     kind = vae_config.get("kind", "identity_debug")

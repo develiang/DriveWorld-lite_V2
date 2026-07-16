@@ -71,6 +71,20 @@ def test_magic_vae_joint_17_frame_protocol(monkeypatch):
     assert adapter.vae.clear_calls == 2
 
 
+def test_magic_vae_joint_24_frame_history_protocol(monkeypatch):
+    adapter = _adapter(monkeypatch)
+    history = torch.zeros(1, 8, 3, 4, 4)
+    future = torch.zeros(1, 16, 3, 4, 4)
+
+    latent, mask = adapter.encode_i2v_training_clip(history, future)
+    encoded_history = adapter.encode_history(history)
+
+    assert latent.shape == (1, 6, 16, 4, 4)
+    assert encoded_history.shape == (1, 2, 16, 4, 4)
+    assert mask.tolist() == [[False, False, True, True, True, True]]
+    assert adapter.vae.encode_lengths == [24, 8]
+
+
 def test_magic_vae_does_not_split_temporal_context_across_public_encode_calls(monkeypatch):
     adapter = _adapter(monkeypatch)
     video = torch.zeros(1, 17, 3, 2, 2)
