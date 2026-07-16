@@ -12,6 +12,7 @@ fps: 12.0
 condition_dropout: 0.15
 kinematics_hidden_size: 256
 gradient_checkpointing: true
+checkpoint_preserve_rng_state: false
 control_mode: static_map
 control_depth: 13
 map_channels: 8
@@ -42,7 +43,7 @@ vae:
   posterior: sample
   temporal_encoding_protocol: diffusers_internal_cache_v1
   micro_frame_size: 8
-  micro_batch_size: 1
+  micro_batch_size: 2
   history_rgb_frames: 8
   future_rgb_frames: 16
   rgb_frames: 24

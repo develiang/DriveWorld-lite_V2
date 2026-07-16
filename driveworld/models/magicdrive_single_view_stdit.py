@@ -532,9 +532,16 @@ class MagicDriveSingleViewSTDiT(nn.Module if torch is not None else object):
             hidden_size, math.prod(self.patch_size), self.out_channels
         )
         self.gradient_checkpointing = False
+        self.checkpoint_preserve_rng_state = True
 
-    def enable_gradient_checkpointing(self, enabled: bool = True):
+    def enable_gradient_checkpointing(
+        self,
+        enabled: bool = True,
+        *,
+        preserve_rng_state: bool = True,
+    ):
         self.gradient_checkpointing = bool(enabled)
+        self.checkpoint_preserve_rng_state = bool(preserve_rng_state)
 
     def _run_block(self, block, *args, **kwargs):
         if self.gradient_checkpointing and self.training and torch.is_grad_enabled():
@@ -543,7 +550,12 @@ class MagicDriveSingleViewSTDiT(nn.Module if torch is not None else object):
             def forward(*values):
                 return block(*values, **kwargs)
 
-            return checkpoint(forward, *args, use_reentrant=False)
+            return checkpoint(
+                forward,
+                *args,
+                use_reentrant=False,
+                preserve_rng_state=self.checkpoint_preserve_rng_state,
+            )
         return block(*args, **kwargs)
 
     def _unpatchify(self, value, frames, height, width, real_shape):
@@ -573,27 +585,44 @@ class MagicDriveSingleViewSTDiT(nn.Module if torch is not None else object):
         if maps is None:
             maps = torch.zeros(
                 batch,
-                rgb_frames,
                 self.map_channels,
                 self.zero_map_size,
                 self.zero_map_size,
                 device=latent.device,
                 dtype=latent.dtype,
             )
-        elif maps.ndim == 4:
-            maps = maps[:, None].expand(-1, rgb_frames, -1, -1, -1)
-        if maps.ndim != 5 or maps.shape[:3] != (batch, rgb_frames, self.map_channels):
+        if maps.ndim == 4:
+            if maps.shape[:2] != (batch, self.map_channels):
+                raise ValueError(
+                    f"static_maps must start with [B,C]=[{batch},{self.map_channels}], "
+                    f"got {tuple(maps.shape)}"
+                )
+            # The dataset provides one anchor-frame BEV map per clip. Encoding
+            # it after expanding to every RGB frame repeats the frozen 2D CNN
+            # rgb_frames times. Encode once, then repeat only its features; the
+            # temporal map encoder still receives the original frame sequence.
+            maps = maps.to(device=latent.device, dtype=latent.dtype)
+            maps = self.controlnet_cond_embedder(maps)
+            maps = maps[:, :, None].expand(-1, -1, rgb_frames, -1, -1)
+        elif maps.ndim == 5 and maps.shape[:3] == (
+            batch,
+            rgb_frames,
+            self.map_channels,
+        ):
+            maps = maps.to(device=latent.device, dtype=latent.dtype)
+            map_height, map_width = maps.shape[-2:]
+            maps = maps.reshape(
+                batch * rgb_frames, self.map_channels, map_height, map_width
+            )
+            maps = self.controlnet_cond_embedder(maps)
+            maps = maps.reshape(
+                batch, rgb_frames, maps.shape[1], maps.shape[2], maps.shape[3]
+            ).permute(0, 2, 1, 3, 4)
+        else:
             raise ValueError(
                 "static_maps must be [B,C,H,W] or [B,T,C,H,W] with "
                 f"T={rgb_frames}, got {tuple(maps.shape)}"
             )
-        maps = maps.to(device=latent.device, dtype=latent.dtype)
-        map_height, map_width = maps.shape[-2:]
-        maps = maps.reshape(batch * rgb_frames, self.map_channels, map_height, map_width)
-        maps = self.controlnet_cond_embedder(maps)
-        maps = maps.reshape(
-            batch, rgb_frames, maps.shape[1], maps.shape[2], maps.shape[3]
-        ).permute(0, 2, 1, 3, 4)
         maps = self.controlnet_cond_embedder_temp(maps)
         target_shape = (frames, token_h * self.patch_size[1], token_w * self.patch_size[2])
         if maps.shape[-3:] != target_shape:

@@ -118,7 +118,13 @@ def _build_magicdrive_single_view(
             "zero_map_size": int(config.get("zero_map_size", 200)),
         },
     )
-    denoiser.enable_gradient_checkpointing(bool(config.get("gradient_checkpointing", True)))
+    preserve_checkpoint_rng = bool(
+        config.get("checkpoint_preserve_rng_state", True)
+    )
+    denoiser.enable_gradient_checkpointing(
+        bool(config.get("gradient_checkpointing", True)),
+        preserve_rng_state=preserve_checkpoint_rng,
+    )
     condition, condition_report = load_mdd_condition_adapter(
         checkpoint_path,
         device=device,
@@ -188,6 +194,10 @@ def _build_magicdrive_single_view(
         motion_region_weight=float(temporal_consistency.get("motion_region_weight", 0.0)),
     )
     finetune = dict(config.get("finetune", {}))
+    if not preserve_checkpoint_rng and float(finetune.get("dropout", 0.0)) != 0:
+        raise ValueError(
+            "checkpoint_preserve_rng_state=false requires finetune.dropout=0"
+        )
     mode = str(finetune.get("mode", "kinematics_adapter"))
     if mode == "kinematics_adapter":
         model.freeze_for_kinematics_adapter_training()

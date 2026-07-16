@@ -596,6 +596,10 @@ def main() -> None:
             broadcast_buffers=False,
             init_sync=False,
             bucket_cap_mb=ddp_bucket_cap_mb,
+            gradient_as_bucket_view=bool(
+                train_config.get("ddp_gradient_as_bucket_view", False)
+            ),
+            static_graph=bool(train_config.get("ddp_static_graph", False)),
         )
 
     writer = None
@@ -621,7 +625,11 @@ def main() -> None:
             f"device={device} world_size={world_size} trainable_parameters={parameter_count:,} "
             f"train_clips={len(train_dataset)} cached_latents={bool(args.latent_cache)} "
             f"precision={precision} model_dtype={model_dtype} ema_dtype={','.join(ema_dtypes)} "
-            f"tf32={str(tf32_enabled).lower()} sdpa_backend={sdpa_backend}",
+            f"tf32={str(tf32_enabled).lower()} sdpa_backend={sdpa_backend} "
+            f"ddp_bucket_cap_mb={ddp_bucket_cap_mb:g} "
+            "ddp_gradient_as_bucket_view="
+            f"{str(bool(train_config.get('ddp_gradient_as_bucket_view', False))).lower()} "
+            f"ddp_static_graph={str(bool(train_config.get('ddp_static_graph', False))).lower()}",
             flush=True,
         )
 

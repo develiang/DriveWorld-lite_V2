@@ -20,5 +20,7 @@ ema_warmup: true
 output_dir: artifacts/runs/v2-mdd-2x5090-lora-12hz-fp32-temporal-v1
 expected_device: 2x_rtx5090_32gb
 distributed_strategy: ddp
-ddp_bucket_cap_mb: 1.0
+ddp_bucket_cap_mb: 2.0
+ddp_gradient_as_bucket_view: true
+ddp_static_graph: true
 training_stage: s3_lora_static_map_12hz_fp32_temporal_v1

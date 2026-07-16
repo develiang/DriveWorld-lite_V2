@@ -103,3 +103,76 @@ def test_mdd_single_view_control_branch_has_stage3_names_and_runs_zero_map():
     )
     assert temporal_output.shape == (1, 4, 6, 8, 8)
     assert torch.isfinite(temporal_output).all()
+
+
+def test_static_anchor_map_is_encoded_once_before_temporal_expansion():
+    model = MagicDriveSingleViewSTDiT(
+        in_channels=4,
+        hidden_size=32,
+        depth=1,
+        control_depth=1,
+        num_heads=4,
+        mlp_ratio=2,
+        zero_map_size=16,
+    ).eval()
+    latent = torch.randn(1, 4, 6, 8, 8)
+    static_map = torch.randn(1, 8, 16, 16)
+    encoded_batches = []
+    handle = model.controlnet_cond_embedder.register_forward_pre_hook(
+        lambda _module, inputs: encoded_batches.append(inputs[0].shape[0])
+    )
+    try:
+        optimized = model._encode_control_map(
+            static_map,
+            latent,
+            frames=6,
+            token_h=4,
+            token_w=4,
+            rgb_frames=24,
+        )
+        expanded = model._encode_control_map(
+            static_map[:, None].expand(-1, 24, -1, -1, -1),
+            latent,
+            frames=6,
+            token_h=4,
+            token_w=4,
+            rgb_frames=24,
+        )
+    finally:
+        handle.remove()
+    assert encoded_batches == [1, 24]
+    assert torch.allclose(optimized, expanded, atol=1e-5, rtol=1e-5)
+
+
+def test_gradient_checkpoint_can_skip_rng_state_for_dropout_free_blocks(monkeypatch):
+    model = MagicDriveSingleViewSTDiT(
+        in_channels=4,
+        hidden_size=32,
+        depth=1,
+        num_heads=4,
+        mlp_ratio=2,
+    ).train()
+    model.enable_gradient_checkpointing(True, preserve_rng_state=False)
+    checkpoint_kwargs = []
+
+    def fake_checkpoint(function, *args, **kwargs):
+        checkpoint_kwargs.append(kwargs)
+        return function(*args)
+
+    monkeypatch.setattr(torch.utils.checkpoint, "checkpoint", fake_checkpoint)
+    latent = torch.randn(1, 4, 5, 8, 8)
+    output = model(
+        latent,
+        torch.tensor([500.0]),
+        torch.randn(1, 5, 3, 32),
+        fps=12.0,
+        height=64,
+        width=64,
+        x_mask=torch.tensor([[False, True, True, True, True]]),
+    )
+    assert torch.isfinite(output).all()
+    assert checkpoint_kwargs
+    assert all(kwargs["use_reentrant"] is False for kwargs in checkpoint_kwargs)
+    assert all(
+        kwargs["preserve_rng_state"] is False for kwargs in checkpoint_kwargs
+    )
